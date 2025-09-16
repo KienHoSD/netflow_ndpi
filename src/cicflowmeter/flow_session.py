@@ -49,6 +49,7 @@ class FlowSession(DefaultSession):
         Functionality is same as on_packet_received, but returnvalues are added.
         """
         self.logger.debug(f"Packet {self.packets_count}: {pkt}")
+        self.logger.info(f"Number of flows: {len(self.flows)}")
         count = 0
         direction = PacketDirection.FORWARD
 
@@ -110,6 +111,12 @@ class FlowSession(DefaultSession):
 
     def get_flows(self):
         return self.flows.values()
+
+    @property
+    def flow_count(self):
+        """Get the current number of active flows."""
+        with self._lock:
+            return len(self.flows)
 
     def garbage_collect(self, latest_time) -> None:
         # TODO: Garbage Collection / Feature Extraction should have a separate thread

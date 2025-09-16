@@ -28,7 +28,7 @@ def _start_periodic_gc(session, interval=GC_INTERVAL):
 
 
 def create_sniffer(
-    input_file, input_interface, output_mode, output, fields=None, verbose=False
+    input_file, input_interface, output_mode, output, fields=None, verbose=False, max_flows=None, max_time=None
 ):
     assert (input_file is None) ^ (input_interface is None), (
         "Either provide interface input or file input not both"
@@ -112,6 +112,22 @@ def main():
         help="comma separated fields to include in output (default: all)",
     )
 
+    parser.add_argument(
+        "--max-flows",
+        action="store",
+        type=int,
+        dest="max_flows",
+        help="maximum number of flows to capture before terminating (default: unlimited)",
+    )
+
+    parser.add_argument(
+        "--max-time",
+        action="store",
+        type=int,
+        dest="max_time",
+        help="maximum time in seconds to capture before terminating (default: unlimited)",
+    )
+
     parser.add_argument("-v", "--verbose", action="store_true", help="more verbose")
 
     args = parser.parse_args()
@@ -123,14 +139,37 @@ def main():
         args.output,
         args.fields,
         args.verbose,
+        args.max_flows,
+        args.max_time,
     )
+    
+    # Start the sniffer
     sniffer.start()
-
+    
+    start_time = time.time()
+    stop_reason = None
+    
     try:
-        sniffer.join()
+        while sniffer.running:
+            time.sleep(0.1)  # Check every 100ms
+            
+            # Check max flows condition
+            if args.max_flows and session.flow_count >= args.max_flows:
+                stop_reason = f"Reached maximum flow count: {args.max_flows}"
+                break
+                
+            # Check max time condition
+            if args.max_time and (time.time() - start_time) >= args.max_time:
+                stop_reason = f"Reached maximum time: {args.max_time} seconds"
+                break
+                
     except KeyboardInterrupt:
-        sniffer.stop()
+        stop_reason = "Interrupted by user"
     finally:
+        if stop_reason:
+            print(f"Stopping sniffer: {stop_reason}")
+        sniffer.stop()
+        
         # Stop periodic GC if present
         if hasattr(session, "_gc_stop"):
             session._gc_stop.set()
