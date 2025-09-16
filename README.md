@@ -1,26 +1,18 @@
-# Python CICFlowMeter
+# Python CICFlowMeter NDPI
 
-> This project is not maintained actively by me. If you found something wrong (bugs, incorrect results) feel free to create issues or pull requests.
-
----
-
-## ⚡️ Version 0.4.0: Major Refactor (June 2025)
-
-- The tool now uses a custom `FlowSession` and the `prn` callback of Scapy's `AsyncSniffer` for all flow processing, instead of relying on Scapy's `DefaultSession`/session system.
-- All flow logic, feature extraction, and output are now fully managed by the project code, not by Scapy internals.
-- The `process` method always returns `None`, preventing unwanted packet printing by Scapy.
-- Logging is robust: only shows debug output if `-v` is set.
-- All flows are always flushed at the end, even for small pcaps.
-- This project is a CICFlowMeter-like tool (see [UNB CICFlowMeter](https://www.unb.ca/cic/research/applications.html#CICFlowMeter)), not Cisco NetFlow. It extracts custom flow features as in the original Java CICFlowMeter.
-- The refactor does not change the set of features/fields extracted, only how packets are routed to your logic.
-
----
+This is a Python implementation of CICFlowMeter with nDPI integration for enhanced protocol detection. It captures network traffic and extracts flow features, supporting both offline pcap files and real-time packet capture from network interfaces with imitation of nProbe tool by Ntop, extract 43 NetFlow version 9 features. For more details on the features, read [Towards a Standard Feature Set for Network Intrusion Detection System Datasets](https://arxiv.org/pdf/2101.11315).
 
 ### Installation
 
 ```sh
-git clone https://github.com/hieulw/cicflowmeter
-cd cicflowmeter
+git clone https://github.com/KienHoSD/cicflowmeter_ndpi.git
+git clone --branch dev https://github.com/ntop/nDPI.git nDPI
+cd nDPI
+./autogen.sh
+./configure
+make
+sudo make install
+cd ../cicflowmeter
 uv sync
 source .venv/bin/activate
 ```
@@ -61,3 +53,4 @@ cicflowmeter -i eth0 -u http://localhost:8080/predict
 
 1. https://www.unb.ca/cic/research/applications.html#CICFlowMeter
 2. https://github.com/ahlashkari/CICFlowMeter
+3. https://arxiv.org/abs/2101.11315

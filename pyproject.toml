@@ -16,6 +16,7 @@ dependencies = [
     "scipy>=1.11.4",
     "scapy>=2.5.0",
     "requests>=2.31.0",
+    "ndpi",
 ]
 changelog = "CHANGELOG.md"
 homepage = "https://github.com/hieulw/cicflowmeter"
@@ -33,3 +34,6 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv.sources]
+ndpi = { path = "../nDPI/python" }
