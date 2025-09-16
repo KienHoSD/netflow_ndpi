@@ -52,5 +52,6 @@ cicflowmeter -i eth0 -u http://localhost:8080/predict
 ### References:
 
 1. https://www.unb.ca/cic/research/applications.html#CICFlowMeter
-2. https://github.com/ahlashkari/CICFlowMeter
-3. https://arxiv.org/abs/2101.11315
+2. https://github.com/hieulw/cicflowmeter
+3. https://github.com/ntop/nDPI
+4. https://arxiv.org/abs/2101.11315
