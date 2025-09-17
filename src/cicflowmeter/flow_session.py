@@ -14,13 +14,14 @@ class FlowSession(DefaultSession):
     """Creates a list of network flows."""
 
     def __init__(
-        self, output_mode=None, output=None, fields=None, verbose=False, *args, **kwargs
+        self, output_mode=None, output=None, fields=None, verbose=False, attack=None, *args, **kwargs
     ):
         self.flows: dict[tuple, Flow] = {}
         self.verbose = verbose
         self.fields = fields
         self.output_mode = output_mode
         self.output = output
+        self.attack = attack
         self.logger = get_logger(self.verbose)
         self.packets_count = 0
         self.output_writer = output_writer_factory(self.output_mode, self.output)
@@ -76,7 +77,7 @@ class FlowSession(DefaultSession):
         if flow is None:
             # Create a new flow (we need to insert into dict under lock)
             direction = PacketDirection.FORWARD
-            flow = Flow(pkt, direction)
+            flow = Flow(pkt, direction, self.attack)
             packet_flow_key = get_packet_flow_key(pkt, direction)
             with self._lock:
                 self.flows[(packet_flow_key, count)] = flow
@@ -90,7 +91,7 @@ class FlowSession(DefaultSession):
                     flow = self.flows.get((packet_flow_key, count))
 
                 if flow is None:
-                    flow = Flow(pkt, direction)
+                    flow = Flow(pkt, direction, self.attack)
                     with self._lock:
                         self.flows[(packet_flow_key, count)] = flow
                     break

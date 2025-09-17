@@ -28,7 +28,7 @@ def _start_periodic_gc(session, interval=GC_INTERVAL):
 
 
 def create_sniffer(
-    input_file, input_interface, output_mode, output, fields=None, verbose=False, max_flows=None, max_time=None
+    input_file, input_interface, output_mode, output, fields=None, verbose=False, max_flows=None, max_time=None, attack=None
 ):
     assert (input_file is None) ^ (input_interface is None), (
         "Either provide interface input or file input not both"
@@ -42,6 +42,7 @@ def create_sniffer(
         output=output,
         fields=fields,
         verbose=verbose,
+        attack=attack
     )
 
     _start_periodic_gc(session, interval=GC_INTERVAL)
@@ -128,6 +129,14 @@ def main():
         help="maximum time in seconds to capture before terminating (default: unlimited)",
     )
 
+    parser.add_argument(
+        "--attack",
+        action="store",
+        type=str,
+        dest="attack",
+        help="indicate the type of attack of current flow capturing"
+    )
+
     parser.add_argument("-v", "--verbose", action="store_true", help="more verbose")
 
     args = parser.parse_args()
@@ -141,6 +150,7 @@ def main():
         args.verbose,
         args.max_flows,
         args.max_time,
+        args.attack
     )
     
     # Start the sniffer

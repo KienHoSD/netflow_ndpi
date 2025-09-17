@@ -15,7 +15,7 @@ from .utils import get_statistics
 class Flow:
     """This class summarizes the values of the features of the network flows"""
 
-    def __init__(self, packet: Packet, direction: PacketDirection):
+    def __init__(self, packet: Packet, direction: PacketDirection, attack: str):
         """This method initializes an object from the Flow class.
 
         Args:
@@ -95,6 +95,12 @@ class Flow:
         self.dns_query_type = 0
         self.dns_ttl_answer = 0
         self.ftp_command_ret_code = 0
+        self.label = 0
+        self.attack = "Benign"
+
+        if attack != None:
+            self.attack=attack
+            self.label=1
 
         # Collect data from first packet
         self._collect_packet_data(packet, direction)
@@ -354,8 +360,8 @@ class Flow:
             "DNS_QUERY_TYPE": self.dns_query_type,
             "DNS_TTL_ANSWER": self.dns_ttl_answer,
             "FTP_COMMAND_RET_CODE": self.ftp_command_ret_code,
-            "Label": "",
-            "Attack": "",
+            "Label": self.label,
+            "Attack": self.attack,
         }
 
         if include_fields is not None:

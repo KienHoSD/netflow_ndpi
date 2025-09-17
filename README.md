@@ -6,13 +6,8 @@ This is a Python implementation of CICFlowMeter with nDPI integration for enhanc
 
 ```sh
 git clone https://github.com/KienHoSD/cicflowmeter_ndpi.git
-git clone --branch dev https://github.com/ntop/nDPI.git nDPI
-cd nDPI
-./autogen.sh
-./configure
-make
-sudo make install
-cd ../cicflowmeter
+git clone --branch dev https://github.com/ntop/nDPI.git
+cd cicflowmeter
 uv sync
 source .venv/bin/activate
 ```
@@ -20,20 +15,24 @@ source .venv/bin/activate
 ### Usage
 
 ```sh
-usage: cicflowmeter [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS] [-v] output
+usage: cicflowmeter [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--attack ATTACK] [-v] output
 
 positional arguments:
   output                output file name (in csv mode) or url (in url mode)
 
 options:
   -h, --help            show this help message and exit
-  -i INPUT_INTERFACE, --interface INPUT_INTERFACE
+  -i, --interface INPUT_INTERFACE
                         capture online data from INPUT_INTERFACE
-  -f INPUT_FILE, --file INPUT_FILE
+  -f, --file INPUT_FILE
                         capture offline data from INPUT_FILE
   -c, --csv             output flows as csv
   -u, --url             output flows as request to url
   --fields FIELDS       comma separated fields to include in output (default: all)
+  --max-flows MAX_FLOWS
+                        maximum number of flows to capture before terminating (default: unlimited)
+  --max-time MAX_TIME   maximum time in seconds to capture before terminating (default: unlimited)
+  --attack ATTACK       indicate the type of attack of current flow capturing
   -v, --verbose         more verbose
 ```
 
