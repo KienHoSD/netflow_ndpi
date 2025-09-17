@@ -95,8 +95,11 @@ class Flow:
         self.set_icmp = False
         self.dns_query_id = 0
         self.dns_query_type = 0
+        self.set_dns_query = False
         self.dns_ttl_answer = 0
+        self.set_dns_ttl = False
         self.ftp_command_ret_code = 0
+        self.set_ftp = False
         self.label = 0
         self.attack = "Benign"
 
@@ -170,34 +173,39 @@ class Flow:
                     # Fallback if ICMP parsing fails
                     self.icmp_type = 0
                     self.icmp_ipv4_type = 0
-        elif packet.haslayer("DNS"):
+        elif packet.haslayer("DNS") and (self.set_dns_query == False or self.set_dns_ttl == False):
             try:
                 dns = packet["DNS"]
-                if dns.qd:
+                if dns.qd and self.set_dns_query == False:
                     self.dns_query_id = dns.id
                     if dns.qd:
                         self.dns_query_type = dns.qd[0].qtype
-                if dns.an:
+                    self.set_dns_query = True  # Only set once per flow
+                if dns.an and self.set_dns_ttl == False:
                     for rr in dns.an:
                         if rr.type == 1:  # A record
                             self.dns_ttl_answer = rr.ttl
                             break
+                    self.set_dns_ttl = True  # Only set once per flow    
             except Exception:
                 pass
-        elif packet.haslayer("TCP") and (packet["TCP"].dport == 21 or packet["TCP"].sport == 21):
-            try:
-                payload = bytes(packet["TCP"].payload)
-                if payload:
-                    lines = payload.split(b'\r\n')
-                    for line in lines:
-                        if line and line[0:3].isdigit():
+        elif packet.haslayer("TCP") and (packet["TCP"].dport == 21 or packet["TCP"].sport == 21) and not self.set_ftp:
+            payload = bytes(packet["TCP"].payload)
+            if payload:
+                # keep a buffer to handle cases where a line spans multiple packets
+                self.ftp_buffer += payload
+                while b"\r\n" in self.ftp_buffer:
+                    line, self.ftp_buffer = self.ftp_buffer.split(b"\r\n", 1)
+                    # line must start with 3 digits
+                    if line[:3].isdigit():
+                        # final reply if 4th char is space (not dash)
+                        if len(line) >= 4 and line[3:4] == b" ":
                             try:
-                                self.ftp_command_ret_code = int(line[0:3])
+                                self.ftp_command_ret_code = int(line[:3])
+                                self.set_ftp = True  # only set once
                                 break
-                            except:
-                                pass
-            except Exception:
-                pass
+                            except ValueError:
+                                continue
 
     def _detect_l7_proto(self, packet: Packet):
         """Detect application layer protocol based on ports."""
