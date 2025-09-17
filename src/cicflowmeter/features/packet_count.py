@@ -60,7 +60,7 @@ class PacketCount:
             return packet["TCP"].payload
         elif "UDP" in packet:
             return packet["UDP"].payload
-        return 0
+        return b""  # Return empty bytes instead of 0
 
     def has_payload(self, packet_direction=None) -> int:
         """Count packet has payload.
