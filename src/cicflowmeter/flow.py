@@ -149,8 +149,8 @@ class Flow:
                 self.first_bwd_time = packet.time
             self.last_bwd_time = packet.time
 
-        # Detect L7 protocol
-        if self.l7_proto is None:
+        # Try detect L7 protocol (0 = unknown)
+        if self.l7_proto == 0:
             self._detect_l7_proto(packet)
 
         if packet.proto == 1:  # ICMP
