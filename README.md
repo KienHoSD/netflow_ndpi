@@ -4,12 +4,48 @@ This is a Python implementation of CICFlowMeter with nDPI integration for enhanc
 
 ### Installation
 
+Need to build (and install) nDPI first:
+
+```sh
+git clone --branch dev https://github.com/ntop/nDPI.git
+cd nDPI
+./autogen.sh
+./configure
+make
+sudo make install # optional
+cd .. # go back to parent directory
+```
+
+Then install this package:
+
 ```sh
 git clone https://github.com/KienHoSD/cicflowmeter_ndpi.git
-git clone --branch dev https://github.com/ntop/nDPI.git
-cd cicflowmeter
+cd cicflowmeter_ndpi
 uv sync
 source .venv/bin/activate
+```
+
+The file structure should look like this:
+
+```
+nDPI/
+├── build/
+└── ...
+cicflowmeter_ndpi/
+├── .venv/
+├── src/
+│   └── cicflowmeter/
+│       ├── __init__.py
+│       ├── features.py
+│       ├── flow.py
+│       ├── ndpi.py
+│       ├── sniffer.py
+│       └── utils.py
+├── tests/
+│   └── test_sniffer.py
+├── README.md
+├── setup.py
+└── example.pcap
 ```
 
 ### Usage
