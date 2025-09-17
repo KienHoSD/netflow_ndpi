@@ -44,8 +44,7 @@ cicflowmeter_ndpi/
 ├── tests/
 │   └── test_sniffer.py
 ├── README.md
-├── setup.py
-└── example.pcap
+└── ...
 ```
 
 ### Usage
