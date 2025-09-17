@@ -54,7 +54,7 @@ class FlowSession(DefaultSession):
         count = 0
         direction = PacketDirection.FORWARD
 
-        if "TCP" not in pkt and "UDP" not in pkt:
+        if "TCP" not in pkt and "UDP" not in pkt and "ICMP" not in pkt:
             return None  # Do not return the packet, prevents Scapy from printing
 
         try:
@@ -95,7 +95,7 @@ class FlowSession(DefaultSession):
                     with self._lock:
                         self.flows[(packet_flow_key, count)] = flow
                     break
-        elif "F" in pkt.flags:
+        elif hasattr(pkt, 'flags') and "F" in pkt.flags:
             # FIN: add packet and early collect
             flow.add_packet(pkt, direction)
             # call garbage_collect with current time; protect with lock inside GC

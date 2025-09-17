@@ -50,16 +50,18 @@ def create_sniffer(
     if input_file:
         sniffer = AsyncSniffer(
             offline=input_file,
-            filter="ip and (tcp or udp)",
+            filter="ip and (tcp or udp or icmp) or (ether proto 0x86dd and (tcp or udp or icmp6))",
             prn=session.process,
             store=False,
+            promisc=False  # Disable promiscuous mode for better stability
         )
     else:
         sniffer = AsyncSniffer(
             iface=input_interface,
-            filter="ip and (tcp or udp)",
+            filter="ip and (tcp or udp or icmp) or (ether proto 0x86dd and (tcp or udp or icmp6))",
             prn=session.process,
             store=False,
+            promisc=False  # Disable promiscuous mode for better stability
         )
     return sniffer, session
 
@@ -154,7 +156,16 @@ def main():
     )
     
     # Start the sniffer
-    sniffer.start()
+    try:
+        sniffer.start()
+    except Exception as e:
+        print(f"Error starting sniffer: {e}")
+        return
+    
+    # Check if sniffer started successfully
+    if not hasattr(sniffer, 'running') or not sniffer.running:
+        print("Sniffer failed to start properly")
+        return
     
     start_time = time.time()
     stop_reason = None
@@ -175,18 +186,37 @@ def main():
                 
     except KeyboardInterrupt:
         stop_reason = "Interrupted by user"
+    except Exception as e:
+        stop_reason = f"Error during sniffing: {e}"
+        print(f"Sniffing error: {e}")
     finally:
         if stop_reason:
             print(f"Stopping sniffer: {stop_reason}")
-        sniffer.stop()
+        
+        # Safely stop the sniffer if it's still running
+        try:
+            if hasattr(sniffer, 'running') and sniffer.running:
+                sniffer.stop()
+        except Exception as e:
+            print(f"Warning: Error stopping sniffer: {e}")
         
         # Stop periodic GC if present
         if hasattr(session, "_gc_stop"):
             session._gc_stop.set()
             session._gc_thread.join(timeout=2.0)
-        sniffer.join()
+        
+        # Join the sniffer thread safely
+        try:
+            if hasattr(sniffer, 'join'):
+                sniffer.join(timeout=2.0)
+        except Exception as e:
+            print(f"Warning: Error joining sniffer thread: {e}")
+            
         # Flush all flows at the end
-        session.flush_flows()
+        try:
+            session.flush_flows()
+        except Exception as e:
+            print(f"Warning: Error flushing flows: {e}")
 
 
 if __name__ == "__main__":

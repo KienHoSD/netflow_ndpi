@@ -39,21 +39,35 @@ def get_packet_flow_key(packet: Packet, direction: PacketDirection) -> tuple:
         protocol = "TCP"
     elif "UDP" in packet:
         protocol = "UDP"
+    elif "ICMP" in packet:
+        protocol = "ICMP"
     else:
-        raise Exception("Only TCP protocols are supported.")
+        raise Exception("Only TCP, UDP, ICMP are supported.")
 
-    if direction == PacketDirection.FORWARD:
-        dest_ip = packet["IP"].dst
-        src_ip = packet["IP"].src
-        src_port = packet[protocol].sport
-        dest_port = packet[protocol].dport
-        # Return the tuple in the order (src_ip, dest_ip, src_port, dest_port) for FORWARD
+    if protocol == "ICMP":
+        # ICMP doesn't have ports, use 0 for both
+        if direction == PacketDirection.FORWARD:
+            dest_ip = packet["IP"].dst
+            src_ip = packet["IP"].src
+            src_port = 0
+            dest_port = 0
+        else: # REVERSE
+            dest_ip = packet["IP"].src
+            src_ip = packet["IP"].dst
+            src_port = 0
+            dest_port = 0
         return src_ip, dest_ip, src_port, dest_port
-    else: # REVERSE
-        dest_ip = packet["IP"].src
-        src_ip = packet["IP"].dst
-        src_port = packet[protocol].dport
-        dest_port = packet[protocol].sport
-        # Return the tuple in the order (src_ip, dest_ip, src_port, dest_port)
-        # The assignments above handle the direction swapping logic.
-        return src_ip, dest_ip, src_port, dest_port
+    else:
+        # TCP/UDP handling
+        if direction == PacketDirection.FORWARD:
+            dest_ip = packet["IP"].dst
+            src_ip = packet["IP"].src
+            src_port = packet[protocol].sport
+            dest_port = packet[protocol].dport
+            return src_ip, dest_ip, src_port, dest_port
+        else: # REVERSE
+            dest_ip = packet["IP"].src
+            src_ip = packet["IP"].dst
+            src_port = packet[protocol].dport
+            dest_port = packet[protocol].sport
+            return src_ip, dest_ip, src_port, dest_port

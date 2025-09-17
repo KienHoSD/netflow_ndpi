@@ -9,7 +9,7 @@ from .features.flow_bytes import FlowBytes
 from .features.packet_count import PacketCount
 from .features.packet_length import PacketLength
 from .features.packet_time import PacketTime
-from .utils import get_statistics
+from .utils import get_statistics, get_logger
 
 
 class Flow:
@@ -36,6 +36,7 @@ class Flow:
         self.start_timestamp = packet.time
         self.latest_timestamp = packet.time  # Initialize latest_timestamp too
         self.protocol = packet.proto
+        self.logger = get_logger(True)
 
         # Add NDPI protocol detection attribute
         self.nDPI = NDPI()
@@ -91,6 +92,7 @@ class Flow:
         self.l7_proto = 0
         self.icmp_ipv4_type = 0
         self.icmp_type = 0
+        self.set_icmp = False
         self.dns_query_id = 0
         self.dns_query_type = 0
         self.dns_ttl_answer = 0
@@ -154,13 +156,20 @@ class Flow:
             self._detect_l7_proto(packet)
 
         if packet.proto == 1:  # ICMP
-            if packet.haslayer("ICMP"):
-                icmp_types = ICMP.types
-                name_to_value = {name: value for name, value in icmp_types.items()}
-                type_val = name_to_value.get(str(packet["ICMP"].type).lower(), 0)
-                code_val = int(packet["ICMP"].code) if hasattr(packet["ICMP"], 'code') else 0
-                self.icmp_type = type_val * 256 + code_val
-                self.icmp_ipv4_type = type_val
+            if packet.haslayer("ICMP") and self.set_icmp == False:
+                try:
+                    icmp = packet["ICMP"]
+                    # Get ICMP type and code safely
+                    type_val = getattr(icmp, 'type', 0)
+                    code_val = getattr(icmp, 'code', 0)
+                    self.icmp_type = type_val * 256 + code_val
+                    self.icmp_ipv4_type = type_val
+                    self.logger.debug(f"ICMP Type: {self.icmp_type}, ICMP IPv4 Type: {self.icmp_ipv4_type}")
+                    self.set_icmp = True  # Only set once per flow
+                except Exception:
+                    # Fallback if ICMP parsing fails
+                    self.icmp_type = 0
+                    self.icmp_ipv4_type = 0
         elif packet.haslayer("DNS"):
             try:
                 dns = packet["DNS"]
@@ -192,9 +201,13 @@ class Flow:
 
     def _detect_l7_proto(self, packet: Packet):
         """Detect application layer protocol based on ports."""
-        self.ndpi_flow = NDPIFlow()
-        self.detected_protocol = self.nDPI.process_packet(self.ndpi_flow, bytes(packet), int(packet.time * 1000), ffi.NULL)
-        self.l7_proto = self.detected_protocol.app_protocol
+        try:
+            self.ndpi_flow = NDPIFlow()
+            self.detected_protocol = self.nDPI.process_packet(self.ndpi_flow, bytes(packet), int(packet.time * 1000), ffi.NULL)
+            self.l7_proto = self.detected_protocol.app_protocol
+        except Exception:
+            # Fallback if NDPI fails
+            self.l7_proto = 0
 
     def count_packets_in_range(self, min_len: int, max_len: int) -> int:
         """Count packets with lengths in the given range."""
