@@ -30,6 +30,7 @@ The file structure should look like this:
 ```
 nDPI/
 ├── build/
+├── python/
 └── ...
 cicflowmeter_ndpi/
 ├── .venv/
