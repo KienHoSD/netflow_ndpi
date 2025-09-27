@@ -1,6 +1,6 @@
 # Python NetFlow NDPI
 
-This is a Python implementation of NetFlow (a fork of [cicflowmeter](https://github.com/hieulw/cicflowmeter)) with nDPI integration for enhanced protocol detection. It captures network traffic and extracts flow features, supporting both offline pcap files and real-time packet capture from network interfaces with imitation of nProbe tool by Ntop, extract 43 NetFlow version 9 features. For more details on the features, read [Towards a Standard Feature Set for Network Intrusion Detection System Datasets](https://arxiv.org/pdf/2101.11315).
+This is a Python implementation of NetFlow (a fork of [cicflowmeter](https://github.com/hieulw/cicflowmeter)) with nDPI integration for enhanced protocol detection. It captures network traffic and extracts flow features, supporting both offline pcap files and real-time packet capture from network interfaces with imitation of nProbe tool by Ntop, can help extract 3 different version of NetFlow (V1,V2,V3) and more. For more details on the NetFlow features [click here](https://staff.itee.uq.edu.au/marius/NIDS_datasets/).
 
 ### Installation
 
@@ -22,7 +22,6 @@ Then install this package:
 git clone https://github.com/KienHoSD/netflow_ndpi.git
 cd netflow_ndpi
 uv sync
-source .venv/bin/activate
 ```
 
 The file structure should look like this:
@@ -34,16 +33,12 @@ nDPI/
 └── ...
 netflow_ndpi/
 ├── .venv/
+├── dist/
 ├── src/
-│   └── netflow/
-│       ├── __init__.py
-│       ├── features.py
-│       ├── flow.py
-│       ├── ndpi.py
-│       ├── sniffer.py
-│       └── utils.py
-├── tests/
-│   └── test_sniffer.py
+├── .gitignore
+├── LICENSE
+├── Makefile
+├── pyproject.toml
 ├── README.md
 └── ...
 ```
@@ -77,26 +72,28 @@ options:
   -v, --verbose         more verbose
 ```
 
+Note: Need to run with sudo to use NDPI library and sniff packets from interface.
+
 Convert pcap file to flow csv:
 
 ```
-netflow -f example.pcap -c flows.csv
+sudo .venv/bin/netflow -f example.pcap -c flows.csv
 ```
 
-Sniff packets real-time from interface to flow request: (**need root permission**)
+Sniff packets real-time from interface to flow request:
 
 ```
-netflow -i eth0 -u http://localhost:8080/predict
+sudo .venv/bin/netflow -i eth0 -u http://localhost:8080/predict
 ```
 
 Sniff packets real-time from interface to flow csv with custom fields without labels and max time:
 
 ```
-netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,PROTOCOL,L7_PROTO" --max-time 60 --no-label
+sudo .venv/bin/netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,PROTOCOL,L7_PROTO" --max-time 60 --no-label
 ```
 
 ### References:
 
-1. https://arxiv.org/abs/2011.09144
+1. https://staff.itee.uq.edu.au/marius/NIDS_datasets/
 2. https://github.com/hieulw/cicflowmeter
 3. https://github.com/ntop/nDPI
