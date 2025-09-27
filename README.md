@@ -92,7 +92,7 @@ netflow -i eth0 -u http://localhost:8080/predict
 Sniff packets real-time from interface to flow csv with custom fields and max time:
 
 ```
-netflow -i eth0 -c flows.csv --fields "Src IP, Dst IP, Protocol, Timestamp, Label" --max-time 60 --label
+netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,PROTOCOL,L7_PROTO,Label" --max-time 60 --label
 ```
 
 ### References:
