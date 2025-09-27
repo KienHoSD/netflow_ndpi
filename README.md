@@ -51,7 +51,7 @@ cicflowmeter_ndpi/
 ### Usage
 
 ```sh
-usage: cicflowmeter [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--attack ATTACK] [-v] output
+usage: cicflowmeter [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--attack ATTACK] [--filter BPF_FILTER] [-v] output
 
 positional arguments:
   output                output file name (in csv mode) or url (in url mode)
@@ -69,6 +69,7 @@ options:
                         maximum number of flows to capture before terminating (default: unlimited)
   --max-time MAX_TIME   maximum time in seconds to capture before terminating (default: unlimited)
   --attack ATTACK       indicate the type of attack of current flow capturing
+  --filter BPF_FILTER   BPF (Berkeley Packet Filter) to apply (default: 'ip and (tcp or udp or icmp)')
   -v, --verbose         more verbose
 ```
 

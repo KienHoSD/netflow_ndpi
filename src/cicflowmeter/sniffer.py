@@ -28,13 +28,16 @@ def _start_periodic_gc(session, interval=GC_INTERVAL):
 
 
 def create_sniffer(
-    input_file, input_interface, output_mode, output, fields=None, verbose=False, max_flows=None, max_time=None, attack=None
+    input_file, input_interface, output_mode, output, fields=None, verbose=False, max_flows=None, max_time=None, attack=None, bpf_filter=None
 ):
     assert (input_file is None) ^ (input_interface is None), (
         "Either provide interface input or file input not both"
     )
     if fields is not None:
         fields = fields.split(",")
+
+    if bpf_filter is None:
+        bpf_filter = "ip and (tcp or udp or icmp)"
 
     # Pass config to FlowSession constructor
     session = FlowSession(
@@ -50,7 +53,7 @@ def create_sniffer(
     if input_file:
         sniffer = AsyncSniffer(
             offline=input_file,
-            filter="ip and (tcp or udp or icmp) or (ether proto 0x86dd and (tcp or udp or icmp6))",
+            filter=bpf_filter,
             prn=session.process,
             store=False,
             promisc=False  # Disable promiscuous mode for better stability
@@ -58,7 +61,7 @@ def create_sniffer(
     else:
         sniffer = AsyncSniffer(
             iface=input_interface,
-            filter="ip and (tcp or udp or icmp) or (ether proto 0x86dd and (tcp or udp or icmp6))",
+            filter=bpf_filter,
             prn=session.process,
             store=False,
             promisc=False  # Disable promiscuous mode for better stability
@@ -139,6 +142,14 @@ def main():
         help="indicate the type of attack of current flow capturing"
     )
 
+    parser.add_argument(
+        "--filter",
+        action="store",
+        dest="bpf_filter",
+        help="BPF (Berkeley Packet Filter) to apply (default: 'ip and (tcp or udp or icmp)')",
+        default="ip and (tcp or udp or icmp)"
+    )
+
     parser.add_argument("-v", "--verbose", action="store_true", help="more verbose")
 
     args = parser.parse_args()
@@ -152,7 +163,8 @@ def main():
         args.verbose,
         args.max_flows,
         args.max_time,
-        args.attack
+        args.attack,
+        args.bpf_filter
     )
     
     # Start the sniffer
