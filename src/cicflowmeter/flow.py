@@ -1,5 +1,6 @@
 from scapy.packet import Packet
 from scapy.layers.inet import ICMP
+from scapy.layers.dns import DNS
 from ndpi import NDPI, NDPIFlow, ffi
 import re
 
@@ -175,7 +176,7 @@ class Flow:
                     # Fallback if ICMP parsing fails
                     self.icmp_type = 0
                     self.icmp_ipv4_type = 0
-        elif packet.haslayer("DNS") and (self.set_dns_query == False or self.set_dns_ttl == False):
+        elif packet.haslayer(DNS) and (self.set_dns_query == False or self.set_dns_ttl == False):
             try:
                 dns = packet["DNS"]
                 if dns.qd and self.set_dns_query == False:
