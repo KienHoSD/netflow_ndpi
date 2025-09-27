@@ -99,7 +99,7 @@ class Flow:
         self.dns_ttl_answer = 0
         self.set_dns_ttl = False
         self.ftp_command_ret_code = 0
-        self.set_ftp = False
+        self.ftp_buffer = b""
         self.label = 0
         self.attack = "Benign"
 
@@ -189,7 +189,7 @@ class Flow:
                     self.set_dns_ttl = True  # Only set once per flow    
             except Exception:
                 pass
-        elif packet.haslayer("TCP") and (packet["TCP"].dport == 21 or packet["TCP"].sport == 21) and not self.set_ftp:
+        elif packet.haslayer("TCP") and (packet["TCP"].dport == 21 or packet["TCP"].sport == 21):
             payload = bytes(packet["TCP"].payload)
             if payload:
                 # keep a buffer to handle cases where a line spans multiple packets
@@ -202,7 +202,6 @@ class Flow:
                         if len(line) >= 4 and line[3:4] == b" ":
                             try:
                                 self.ftp_command_ret_code = int(line[:3])
-                                self.set_ftp = True  # only set once
                                 break
                             except ValueError:
                                 continue
