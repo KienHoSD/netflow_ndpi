@@ -383,9 +383,21 @@ class Flow:
             "DNS_QUERY_TYPE": self.dns_query_type,
             "DNS_TTL_ANSWER": self.dns_ttl_answer,
             "FTP_COMMAND_RET_CODE": self.ftp_command_ret_code,
+            "FLOW_START_MILLISECONDS": round(self.start_timestamp * 1000),
+            "FLOW_END_MILLISECONDS": round(self.latest_timestamp * 1000),
+            "SRC_TO_DST_IAT_MIN": round(forward_iat["min"] * 1000) if forward_iat["min"] is not None else 0,
+            "SRC_TO_DST_IAT_MAX": round(forward_iat["max"] * 1000) if forward_iat["max"] is not None else 0,
+            "SRC_TO_DST_IAT_AVG": round(forward_iat["mean"] * 1000) if forward_iat["mean"] is not None else 0,
+            "SRC_TO_DST_IAT_STDDEV": round(forward_iat["std"] * 1000) if forward_iat["std"] is not None else 0,
+            "DST_TO_SRC_IAT_MIN": round(backward_iat["min"] * 1000) if backward_iat["min"] is not None else 0,
+            "DST_TO_SRC_IAT_MAX": round(backward_iat["max"] * 1000) if backward_iat["max"] is not None else 0,
+            "DST_TO_SRC_IAT_AVG": round(backward_iat["mean"] * 1000) if backward_iat["mean"] is not None else 0,
+            "DST_TO_SRC_IAT_STDDEV": round(backward_iat["std"] * 1000) if backward_iat["std"] is not None else 0,
             "Label": self.label,
             "Attack": self.attack,
         }
+
+        
 
         if include_fields is not None:
             data = {k: v for k, v in data.items() if k in include_fields}

@@ -27,13 +27,50 @@ def _start_periodic_gc(session, interval=GC_INTERVAL):
 
 
 def create_sniffer(
-    input_file, input_interface, output_mode, output, fields=None, verbose=False, max_flows=None, max_time=None, attack=None, bpf_filter=None
+    input_file, input_interface, output_mode, output, fields=None, version=None, verbose=False, max_flows=None, max_time=None, label=None, attack=None, bpf_filter=None
 ):
     assert (input_file is None) ^ (input_interface is None), (
         "Either provide interface input or file input not both"
     )
     if fields is not None:
         fields = fields.split(",")
+
+    netflow_version_one_fields = ["IPV4_SRC_ADDR", "L4_SRC_PORT", "IPV4_DST_ADDR", "L4_DST_PORT", "PROTOCOL", 
+                                    "TCP_FLAGS", "L7_PROTO", "IN_BYTES", "IN_PKTS", "OUT_BYTES", "OUT_PKTS", "FLOW_DURATION_MILLISECONDS"]
+    netflow_version_two_fields = netflow_version_one_fields + ["DURATION_IN", "DURATION_OUT",
+                                                                "MIN_TTL", "MAX_TTL", "LONGEST_FLOW_PKT", "SHORTEST_FLOW_PKT",
+                                                                "MIN_IP_PKT_LEN", "MAX_IP_PKT_LEN", "SRC_TO_DST_SECOND_BYTES",
+                                                                "DST_TO_SRC_SECOND_BYTES", "RETRANSMITTED_IN_BYTES", "RETRANSMITTED_IN_PKTS",
+                                                                "RETRANSMITTED_OUT_BYTES", "RETRANSMITTED_OUT_PKTS",
+                                                                "SRC_TO_DST_AVG_THROUGHPUT", "DST_TO_SRC_AVG_THROUGHPUT",
+                                                                "NUM_PKTS_UP_TO_128_BYTES", "NUM_PKTS_128_TO_256_BYTES",
+                                                                "NUM_PKTS_256_TO_512_BYTES", "NUM_PKTS_512_TO_1024_BYTES",
+                                                                "NUM_PKTS_1024_TO_1514_BYTES", "TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT",
+                                                                "ICMP_TYPE", "ICMP_IPV4_TYPE", "DNS_QUERY_ID", "DNS_QUERY_TYPE",
+                                                                "DNS_TTL_ANSWER", "FTP_COMMAND_RET_CODE"]
+    netflow_version_three_fields = netflow_version_two_fields + ["FLOW_START_MILLISECONDS", "FLOW_END_MILLISECONDS",
+                                                                    "SRC_TO_DST_IAT_MIN", "SRC_TO_DST_IAT_MAX",
+                                                                    "SRC_TO_DST_IAT_AVG", "SRC_TO_DST_IAT_STDDEV",
+                                                                    "DST_TO_SRC_IAT_MIN", "DST_TO_SRC_IAT_MAX",
+                                                                    "DST_TO_SRC_IAT_AVG", "DST_TO_SRC_IAT_STDDEV"]
+
+    if version is not None and fields is None:
+        if version == '1':
+            fields = netflow_version_one_fields
+        elif version == '2':
+            fields = netflow_version_two_fields
+        elif version == '3':
+            fields = netflow_version_three_fields
+        else:
+            raise ValueError("Unsupported NetFlow version. Supported versions are 1, 2, and 3.")
+        
+    # Default to version 2 if neither version nor fields are specified
+    if version is None and fields is None:
+        version = '2'
+        fields = netflow_version_two_fields
+    
+    if label is True:
+        fields.extend(["Label", "Attack"])
 
     if bpf_filter is None:
         bpf_filter = "ip and (tcp or udp or icmp)"
@@ -110,11 +147,18 @@ def main():
         help="output file name (in csv mode) or url (in url mode)",
     )
 
-    parser.add_argument(
+    include_fields = parser.add_mutually_exclusive_group(required=False)
+    include_fields.add_argument(
         "--fields",
         action="store",
         dest="fields",
         help="comma separated fields to include in output (default: all)",
+    )
+    include_fields.add_argument(
+        "--version",
+        action="store",
+        dest="version",
+        help="which version of NetFlow features to include (support: 1,2,3) (default: 2)",
     )
 
     parser.add_argument(
@@ -131,6 +175,14 @@ def main():
         type=int,
         dest="max_time",
         help="maximum time in seconds to capture before terminating (default: unlimited)",
+    )
+
+    parser.add_argument(
+        "--label",
+        action="store_true",
+        dest="label",
+        help="add Label/Attack column to output (default: True)",
+        default=True
     )
 
     parser.add_argument(
@@ -159,9 +211,11 @@ def main():
         args.output_mode,
         args.output,
         args.fields,
+        args.version,
         args.verbose,
         args.max_flows,
         args.max_time,
+        args.label,
         args.attack,
         args.bpf_filter
     )

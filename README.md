@@ -51,7 +51,9 @@ netflow_ndpi/
 ### Usage
 
 ```sh
-usage: netflow [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--attack ATTACK] [--filter BPF_FILTER] [-v] output
+usage: netflow [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS | --version VERSION] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--label] [--attack ATTACK]
+               [--filter BPF_FILTER] [-v]
+               output
 
 positional arguments:
   output                output file name (in csv mode) or url (in url mode)
@@ -65,9 +67,11 @@ options:
   -c, --csv             output flows as csv
   -u, --url             output flows as request to url
   --fields FIELDS       comma separated fields to include in output (default: all)
+  --version VERSION     which version of NetFlow features to include (support: 1,2,3) (default: 2)
   --max-flows MAX_FLOWS
                         maximum number of flows to capture before terminating (default: unlimited)
   --max-time MAX_TIME   maximum time in seconds to capture before terminating (default: unlimited)
+  --label               add Label/Attack column to output (default: True)
   --attack ATTACK       indicate the type of attack of current flow capturing
   --filter BPF_FILTER   BPF (Berkeley Packet Filter) to apply (default: 'ip and (tcp or udp or icmp)')
   -v, --verbose         more verbose
@@ -83,6 +87,12 @@ Sniff packets real-time from interface to flow request: (**need root permission*
 
 ```
 netflow -i eth0 -u http://localhost:8080/predict
+```
+
+Sniff packets real-time from interface to flow csv with custom fields and max time:
+
+```
+netflow -i eth0 -c flows.csv --fields "Src IP, Dst IP, Protocol, Timestamp, Label" --max-time 60 --label
 ```
 
 ### References:

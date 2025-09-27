@@ -23,6 +23,7 @@ class FlowSession(DefaultSession):
         self.output = output
         self.attack = attack
         self.logger = get_logger(self.verbose)
+        self.logger.info(f"Fields to be extracted: {self.fields}")
         self.packets_count = 0
         self.output_writer = output_writer_factory(self.output_mode, self.output)
 
