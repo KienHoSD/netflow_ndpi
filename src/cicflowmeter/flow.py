@@ -1,6 +1,7 @@
 from scapy.packet import Packet
 from scapy.layers.inet import ICMP
 from ndpi import NDPI, NDPIFlow, ffi
+import re
 
 from . import constants
 from .features.context import PacketDirection, get_packet_flow_key
@@ -40,7 +41,8 @@ class Flow:
 
         # Add NDPI protocol detection attribute
         self.nDPI = NDPI()
-        self.ndpi_flow = None
+        # self.ndpi_flow = None
+        self.ndpi_flow = NDPIFlow()
         self.detected_protocol = None
 
         # Initialize window sizes
@@ -74,7 +76,7 @@ class Flow:
         self.backward_bulk_size = 0
         self.backward_bulk_size_tmp = 0
 
-        # New attributes for UNSW-NB15 features
+        # New attributes help resulting 43 features and more
         self.ttls = []
         self.tcp_windows_in = []  # forward
         self.tcp_windows_out = []  # reverse
@@ -194,8 +196,9 @@ class Flow:
             if payload:
                 # keep a buffer to handle cases where a line spans multiple packets
                 self.ftp_buffer += payload
-                while b"\r\n" in self.ftp_buffer:
-                    line, self.ftp_buffer = self.ftp_buffer.split(b"\r\n", 1)
+                lines = re.split(b"\r?\n", self.ftp_buffer)
+                self.ftp_buffer = lines[-1]  # Keep the last partial line in buffer
+                for line in lines[:-1]:  # Process complete lines
                     # line must start with 3 digits
                     if line[:3].isdigit():
                         # final reply if 4th char is space (not dash)
@@ -209,7 +212,6 @@ class Flow:
     def _detect_l7_proto(self, packet: Packet):
         """Detect application layer protocol based on ports."""
         try:
-            self.ndpi_flow = NDPIFlow()
             self.detected_protocol = self.nDPI.process_packet(self.ndpi_flow, bytes(packet), int(packet.time * 1000), ffi.NULL)
             self.l7_proto = self.detected_protocol.app_protocol
         except Exception:
