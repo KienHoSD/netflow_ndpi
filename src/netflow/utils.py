@@ -6,7 +6,7 @@ import numpy
 
 
 def get_logger(debug=False):
-    logger = logging.getLogger("cicflowmeter")
+    logger = logging.getLogger("netflow")
     if not logger.hasHandlers():
         logging.basicConfig()
     logger.setLevel(logging.DEBUG if debug else logging.WARNING)

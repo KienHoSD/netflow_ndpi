@@ -2,7 +2,7 @@ import threading
 from scapy.packet import Packet
 from scapy.sessions import DefaultSession
 
-from cicflowmeter.writer import output_writer_factory
+from netflow.writer import output_writer_factory
 
 from .constants import EXPIRED_UPDATE, PACKETS_PER_GC
 from .features.context import PacketDirection, get_packet_flow_key

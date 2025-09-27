@@ -104,39 +104,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cicflowmeter"
-version = "0.4.2"
-source = { editable = "." }
-dependencies = [
-    { name = "ndpi" },
-    { name = "numpy" },
-    { name = "requests" },
-    { name = "scapy" },
-    { name = "scipy" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "ndpi", directory = "../nDPI/python" },
-    { name = "numpy", specifier = ">=1.26.2" },
-    { name = "requests", specifier = ">=2.31.0" },
-    { name = "scapy", specifier = ">=2.5.0" },
-    { name = "scipy", specifier = ">=1.11.4" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -173,6 +140,39 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "cffi", specifier = ">=1.15.0" }]
+
+[[package]]
+name = "netflow"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "ndpi" },
+    { name = "numpy" },
+    { name = "requests" },
+    { name = "scapy" },
+    { name = "scipy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ndpi", directory = "../nDPI/python" },
+    { name = "numpy", specifier = ">=1.26.2" },
+    { name = "requests", specifier = ">=2.31.0" },
+    { name = "scapy", specifier = ">=2.5.0" },
+    { name = "scipy", specifier = ">=1.11.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
 
 [[package]]
 name = "numpy"

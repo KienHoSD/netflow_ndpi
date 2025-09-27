@@ -3,10 +3,9 @@ import time
 
 from scapy.sendrecv import AsyncSniffer
 
-from cicflowmeter.flow_session import FlowSession
+from netflow.flow_session import FlowSession
+from netflow.constants import GC_INTERVAL, CHECK_INTERVAL
 import threading
-
-GC_INTERVAL = 1.0  # seconds (tune as needed)
 
 
 def _start_periodic_gc(session, interval=GC_INTERVAL):
@@ -184,7 +183,7 @@ def main():
     
     try:
         while sniffer.running:
-            time.sleep(0.1)  # Check every 100ms
+            time.sleep(CHECK_INTERVAL) # Sleep briefly to avoid busy waiting
             
             # Check max flows condition
             if args.max_flows and session.flow_count >= args.max_flows:

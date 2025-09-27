@@ -1,8 +1,8 @@
 [project]
-name = "cicflowmeter"
-version = "0.4.2"
-description = "CICFlowMeter Python Implementation"
-authors = [{ name = "Hieu Le", email = "hieulw99@gmail.com" }]
+name = "netflow"
+version = "1.0.0"
+description = "NetFlow Python Implementation"
+authors = [{ name = "Kien Ho", email = "channelback546@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
@@ -19,11 +19,11 @@ dependencies = [
     "ndpi",
 ]
 changelog = "CHANGELOG.md"
-homepage = "https://github.com/hieulw/cicflowmeter"
-repository = "https://github.com/hieulw/cicflowmeter"
+homepage = "https://github.com/KienHoSD/netflow_ndpi"
+repository = "https://github.com/KienHoSD/netflow_ndpi"
 
 [project.scripts]
-cicflowmeter = "cicflowmeter.sniffer:main"
+netflow = "netflow.sniffer:main"
 
 [dependency-groups]
 dev = [
