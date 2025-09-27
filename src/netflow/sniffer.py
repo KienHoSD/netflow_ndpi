@@ -35,24 +35,24 @@ def create_sniffer(
     if fields is not None:
         fields = fields.split(",")
 
-    netflow_version_one_fields = ["IPV4_SRC_ADDR", "L4_SRC_PORT", "IPV4_DST_ADDR", "L4_DST_PORT", "PROTOCOL", 
-                                    "TCP_FLAGS", "L7_PROTO", "IN_BYTES", "IN_PKTS", "OUT_BYTES", "OUT_PKTS", "FLOW_DURATION_MILLISECONDS"]
+    netflow_version_one_fields = ["IPV4_SRC_ADDR", "L4_SRC_PORT", "IPV4_DST_ADDR", "L4_DST_PORT", "PROTOCOL",
+                                  "TCP_FLAGS", "L7_PROTO", "IN_BYTES", "IN_PKTS", "OUT_BYTES", "OUT_PKTS", "FLOW_DURATION_MILLISECONDS"]
     netflow_version_two_fields = netflow_version_one_fields + ["DURATION_IN", "DURATION_OUT",
-                                                                "MIN_TTL", "MAX_TTL", "LONGEST_FLOW_PKT", "SHORTEST_FLOW_PKT",
-                                                                "MIN_IP_PKT_LEN", "MAX_IP_PKT_LEN", "SRC_TO_DST_SECOND_BYTES",
-                                                                "DST_TO_SRC_SECOND_BYTES", "RETRANSMITTED_IN_BYTES", "RETRANSMITTED_IN_PKTS",
-                                                                "RETRANSMITTED_OUT_BYTES", "RETRANSMITTED_OUT_PKTS",
-                                                                "SRC_TO_DST_AVG_THROUGHPUT", "DST_TO_SRC_AVG_THROUGHPUT",
-                                                                "NUM_PKTS_UP_TO_128_BYTES", "NUM_PKTS_128_TO_256_BYTES",
-                                                                "NUM_PKTS_256_TO_512_BYTES", "NUM_PKTS_512_TO_1024_BYTES",
-                                                                "NUM_PKTS_1024_TO_1514_BYTES", "TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT",
-                                                                "ICMP_TYPE", "ICMP_IPV4_TYPE", "DNS_QUERY_ID", "DNS_QUERY_TYPE",
-                                                                "DNS_TTL_ANSWER", "FTP_COMMAND_RET_CODE"]
+                                                               "MIN_TTL", "MAX_TTL", "LONGEST_FLOW_PKT", "SHORTEST_FLOW_PKT",
+                                                               "MIN_IP_PKT_LEN", "MAX_IP_PKT_LEN", "SRC_TO_DST_SECOND_BYTES",
+                                                               "DST_TO_SRC_SECOND_BYTES", "RETRANSMITTED_IN_BYTES", "RETRANSMITTED_IN_PKTS",
+                                                               "RETRANSMITTED_OUT_BYTES", "RETRANSMITTED_OUT_PKTS",
+                                                               "SRC_TO_DST_AVG_THROUGHPUT", "DST_TO_SRC_AVG_THROUGHPUT",
+                                                               "NUM_PKTS_UP_TO_128_BYTES", "NUM_PKTS_128_TO_256_BYTES",
+                                                               "NUM_PKTS_256_TO_512_BYTES", "NUM_PKTS_512_TO_1024_BYTES",
+                                                               "NUM_PKTS_1024_TO_1514_BYTES", "TCP_WIN_MAX_IN", "TCP_WIN_MAX_OUT",
+                                                               "ICMP_TYPE", "ICMP_IPV4_TYPE", "DNS_QUERY_ID", "DNS_QUERY_TYPE",
+                                                               "DNS_TTL_ANSWER", "FTP_COMMAND_RET_CODE"]
     netflow_version_three_fields = netflow_version_two_fields + ["FLOW_START_MILLISECONDS", "FLOW_END_MILLISECONDS",
-                                                                    "SRC_TO_DST_IAT_MIN", "SRC_TO_DST_IAT_MAX",
-                                                                    "SRC_TO_DST_IAT_AVG", "SRC_TO_DST_IAT_STDDEV",
-                                                                    "DST_TO_SRC_IAT_MIN", "DST_TO_SRC_IAT_MAX",
-                                                                    "DST_TO_SRC_IAT_AVG", "DST_TO_SRC_IAT_STDDEV"]
+                                                                 "SRC_TO_DST_IAT_MIN", "SRC_TO_DST_IAT_MAX",
+                                                                 "SRC_TO_DST_IAT_AVG", "SRC_TO_DST_IAT_STDDEV",
+                                                                 "DST_TO_SRC_IAT_MIN", "DST_TO_SRC_IAT_MAX",
+                                                                 "DST_TO_SRC_IAT_AVG", "DST_TO_SRC_IAT_STDDEV"]
 
     if version is not None and fields is None:
         if version == '1':
@@ -63,14 +63,19 @@ def create_sniffer(
             fields = netflow_version_three_fields
         else:
             raise ValueError("Unsupported NetFlow version. Supported versions are 1, 2, and 3.")
-        
+
     # Default to version 2 if neither version nor fields are specified
     if version is None and fields is None:
         version = '2'
         fields = netflow_version_two_fields
-    
+
     if label is True:
         fields.extend(["Label", "Attack"])
+    else:
+        if "Label" in fields:
+            fields.remove("Label")
+        if "Attack" in fields:
+            fields.remove("Attack")
 
     if bpf_filter is None:
         bpf_filter = "ip and (tcp or udp or icmp)"
@@ -177,15 +182,15 @@ def main():
         help="maximum time in seconds to capture before terminating (default: unlimited)",
     )
 
-    parser.add_argument(
-        "--label",
-        action="store_true",
+    label_related = parser.add_mutually_exclusive_group(required=False)
+    label_related.add_argument(
+        "--no-label",
+        action="store_false",
         dest="label",
-        help="add Label/Attack column to output (default: True)",
+        help="remove Label/Attack column from output (default: False)",
         default=True
     )
-
-    parser.add_argument(
+    label_related.add_argument(
         "--attack",
         action="store",
         type=str,
@@ -219,36 +224,36 @@ def main():
         args.attack,
         args.bpf_filter
     )
-    
+
     # Start the sniffer
     try:
         sniffer.start()
     except Exception as e:
         print(f"Error starting sniffer: {e}")
         return
-    
+
     # Check if sniffer started successfully
     if not hasattr(sniffer, 'running') or not sniffer.running:
         print("Sniffer failed to start properly")
         return
-    
+
     start_time = time.time()
     stop_reason = None
-    
+
     try:
         while sniffer.running:
-            time.sleep(CHECK_INTERVAL) # Sleep briefly to avoid busy waiting
-            
+            time.sleep(CHECK_INTERVAL)  # Sleep briefly to avoid busy waiting
+
             # Check max flows condition
             if args.max_flows and session.flow_count >= args.max_flows:
                 stop_reason = f"Reached maximum flow count: {args.max_flows}"
                 break
-                
+
             # Check max time condition
             if args.max_time and (time.time() - start_time) >= args.max_time:
                 stop_reason = f"Reached maximum time: {args.max_time} seconds"
                 break
-                
+
     except KeyboardInterrupt:
         stop_reason = "Interrupted by user"
     except Exception as e:
@@ -257,26 +262,26 @@ def main():
     finally:
         if stop_reason:
             print(f"Stopping sniffer: {stop_reason}")
-        
+
         # Safely stop the sniffer if it's still running
         try:
             if hasattr(sniffer, 'running') and sniffer.running:
                 sniffer.stop()
         except Exception as e:
             print(f"Warning: Error stopping sniffer: {e}")
-        
+
         # Stop periodic GC if present
         if hasattr(session, "_gc_stop"):
             session._gc_stop.set()
             session._gc_thread.join(timeout=2.0)
-        
+
         # Join the sniffer thread safely
         try:
             if hasattr(sniffer, 'join'):
                 sniffer.join(timeout=2.0)
         except Exception as e:
             print(f"Warning: Error joining sniffer thread: {e}")
-            
+
         # Flush all flows at the end
         try:
             session.flush_flows()

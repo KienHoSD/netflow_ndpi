@@ -51,7 +51,7 @@ netflow_ndpi/
 ### Usage
 
 ```sh
-usage: netflow [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS | --version VERSION] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--label] [--attack ATTACK]
+usage: netflow [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS | --version VERSION] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--no-label | --attack ATTACK]
                [--filter BPF_FILTER] [-v]
                output
 
@@ -71,7 +71,7 @@ options:
   --max-flows MAX_FLOWS
                         maximum number of flows to capture before terminating (default: unlimited)
   --max-time MAX_TIME   maximum time in seconds to capture before terminating (default: unlimited)
-  --label               add Label/Attack column to output (default: True)
+  --no-label            remove Label/Attack column from output (default: False)
   --attack ATTACK       indicate the type of attack of current flow capturing
   --filter BPF_FILTER   BPF (Berkeley Packet Filter) to apply (default: 'ip and (tcp or udp or icmp)')
   -v, --verbose         more verbose
@@ -89,10 +89,10 @@ Sniff packets real-time from interface to flow request: (**need root permission*
 netflow -i eth0 -u http://localhost:8080/predict
 ```
 
-Sniff packets real-time from interface to flow csv with custom fields and max time:
+Sniff packets real-time from interface to flow csv with custom fields without labels and max time:
 
 ```
-netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,PROTOCOL,L7_PROTO,Label" --max-time 60 --label
+netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,PROTOCOL,L7_PROTO" --max-time 60 --no-label
 ```
 
 ### References:
