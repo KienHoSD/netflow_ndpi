@@ -4,7 +4,7 @@ This is a Python implementation of NetFlow (a fork of [cicflowmeter](https://git
 
 ### Installation
 
-Need to build (and install) nDPI first:
+Need to install [denpendencies](https://github.com/ntop/nDPI?tab=readme-ov-file#how-to-compile-ndpi) and compile nDPI library first:
 
 ```sh
 git clone --branch dev https://github.com/ntop/nDPI.git
