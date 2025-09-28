@@ -1,6 +1,6 @@
 [project]
 name = "netflow"
-version = "1.0.0"
+version = "1.0.1"
 description = "NetFlow Python Implementation"
 authors = [{ name = "Kien Ho", email = "channelback546@gmail.com" }]
 readme = "README.md"
