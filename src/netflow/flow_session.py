@@ -50,8 +50,6 @@ class FlowSession(DefaultSession):
         Needed for use in scapy versions above 2.5 because of a breaking change in scapy.
         Functionality is same as on_packet_received, but returnvalues are added.
         """
-        self.logger.debug(f"Packet {self.packets_count}: {pkt}")
-        self.logger.info(f"Number of flows: {len(self.flows)}")
         count = 0
         direction = PacketDirection.FORWARD
 
@@ -109,6 +107,8 @@ class FlowSession(DefaultSession):
         if self.packets_count % PACKETS_PER_GC == 0 or flow.duration > 120:
             self.garbage_collect(pkt.time)
 
+        self.logger.debug(f"Packet {self.packets_count}: {pkt}")
+        self.logger.info(f"Number of flows: {len(self.flows)}")
         return None
 
     def get_flows(self):
