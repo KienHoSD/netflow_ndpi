@@ -77,7 +77,7 @@ class Flow:
         self.backward_bulk_size = 0
         self.backward_bulk_size_tmp = 0
 
-        # New attributes help resulting 43 features and more
+        # New attributes help resulting 43 features and more (set the default values here)
         self.ttls = []
         self.tcp_windows_in = []  # forward
         self.tcp_windows_out = []  # reverse
@@ -92,16 +92,16 @@ class Flow:
         self.last_fwd_time = packet.time if direction == PacketDirection.FORWARD else None
         self.first_bwd_time = packet.time if direction == PacketDirection.REVERSE else None
         self.last_bwd_time = packet.time if direction == PacketDirection.REVERSE else None
-        self.l7_proto = 0
-        self.icmp_ipv4_type = 0
-        self.icmp_type = 0
+        self.l7_proto = 0              # 0 = unknown/undetected protocol (nDPI standard)
+        self.icmp_ipv4_type = -1       # -1 = not ICMP traffic (distinguishes from type 0)
+        self.icmp_type = -1            # -1 = not ICMP traffic (distinguishes from type 0)
         self.set_icmp = False
-        self.dns_query_id = 0
-        self.dns_query_type = 0
+        self.dns_query_id = -1         # -1 = not DNS traffic (distinguishes from ID 0)
+        self.dns_query_type = -1       # -1 = not DNS traffic (distinguishes from type 0)
         self.set_dns_query = False
-        self.dns_ttl_answer = 0
+        self.dns_ttl_answer = -1       # -1 = no DNS answer/not DNS (distinguishes from TTL 0)
         self.set_dns_ttl = False
-        self.ftp_command_ret_code = 0
+        self.ftp_command_ret_code = -1 # -1 = not FTP traffic (distinguishes from code 0)
         self.ftp_buffer = b""
         self.label = 0
         self.attack = "Benign"
