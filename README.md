@@ -92,6 +92,20 @@ Sniff packets real-time from interface to flow csv with custom fields without la
 sudo .venv/bin/netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,PROTOCOL,L7_PROTO" --max-time 60 --no-label
 ```
 
+### Using PyPy for performance
+
+PyPy can improve long-running captures thanks to JIT. See docs for setup and tips:
+
+- docs/pypy.md
+
+Quick start with uv and PyPy:
+
+```sh
+export UV_PYTHON=$(command -v pypy3)
+uv sync
+sudo .venv/bin/netflow -i eth0 -c flows.csv
+```
+
 ### References:
 
 1. https://staff.itee.uq.edu.au/marius/NIDS_datasets/

@@ -1,7 +1,7 @@
 from datetime import datetime
+import statistics
 
 import numpy
-from scipy import stats as stat
 
 
 class PacketTime:
@@ -127,8 +127,7 @@ class PacketTime:
         """
         mode = -1
         if len(self._get_packet_times()) != 0:
-            mode = stat.mode(self._get_packet_times())
-            mode = float(mode[0])
+            mode = float(statistics.mode(self._get_packet_times()))
 
         return mode
 

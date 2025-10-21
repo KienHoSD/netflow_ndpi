@@ -1,5 +1,6 @@
+import statistics
+
 import numpy
-from scipy import stats as stat
 
 from .context import PacketDirection
 
@@ -78,7 +79,7 @@ class ResponseTime:
         """
         mode = -1
         if len(self.get_dif()) != 0:
-            mode = float(stat.mode(self.get_dif())[0])
+            mode = float(statistics.mode(self.get_dif()))
 
         return mode
 

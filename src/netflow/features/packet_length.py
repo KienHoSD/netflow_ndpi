@@ -1,5 +1,6 @@
+import statistics
+
 import numpy
-from scipy import stats as stat
 
 
 class PacketLength:
@@ -172,7 +173,7 @@ class PacketLength:
         """
         mode = -1
         if len(self.get_packet_length()) != 0:
-            mode = int(stat.mode(self.get_packet_length())[0])
+            mode = int(statistics.mode(self.get_packet_length()))
 
         return mode
 
