@@ -210,11 +210,28 @@ class Flow:
                             except ValueError:
                                 continue
 
-    def _detect_l7_proto(self, packet: Packet):
-        """Detect application layer protocol based on ports."""
+    def _packet_ip_bytes(self, packet: Packet):
+        """Return Layer-3 (IP/IPv6) bytes for nDPI, or None if not IP."""
         try:
-            self.detected_protocol = self.nDPI.process_packet(self.ndpi_flow, bytes(packet), int(packet.time * 1000), ffi.NULL)
-            self.l7_proto = self.detected_protocol.app_protocol
+            if packet.haslayer("IP"):
+                return bytes(packet["IP"])  # IPv4 L3 bytes
+            if packet.haslayer("IPv6"):
+                return bytes(packet["IPv6"])  # IPv6 L3 bytes
+        except Exception:
+            pass
+        return None
+
+    def _detect_l7_proto(self, packet: Packet):
+        """Detect application layer protocol using nDPI (feed IP bytes, like ndpi_example)."""
+        try:
+            ip_bytes = self._packet_ip_bytes(packet)
+            if ip_bytes is None:
+                # Not an IP packet; leave as unknown
+                return
+            time_ms = int(packet.time * 1000)
+            self.detected_protocol = self.nDPI.process_packet(self.ndpi_flow, ip_bytes, time_ms, ffi.NULL)
+            # Use app_protocol (0 means unknown yet)
+            self.l7_proto = getattr(self.detected_protocol, "app_protocol", 0) or 0
         except Exception:
             # Fallback if NDPI fails
             self.l7_proto = 0
@@ -320,7 +337,7 @@ class Flow:
             separate out too much.
 
         Returns:
-           list: returns a List of values to be outputted into a csv file.
+        list: returns a List of values to be outputted into a csv file.
 
         """
 
@@ -338,6 +355,14 @@ class Flow:
         )
         active_stat = get_statistics(self.active)
         idle_stat = get_statistics(self.idle)
+
+        # If protocol still unknown, let nDPI try a last-guess (like ndpi_example.giveup)
+        try:
+            if self.l7_proto == 0 and self.ndpi_flow is not None:
+                guessed = self.nDPI.giveup(self.ndpi_flow)
+                self.l7_proto = getattr(guessed, "app_protocol", self.l7_proto) or self.l7_proto
+        except Exception:
+            pass
 
         data = {
             "IPV4_SRC_ADDR": self.src_ip,
