@@ -4,11 +4,13 @@ import time
 from scapy.sendrecv import AsyncSniffer
 
 from netflow.flow_session import FlowSession
-from netflow.constants import GC_INTERVAL, CHECK_INTERVAL
+from netflow import constants
 import threading
 
 
-def _start_periodic_gc(session, interval=GC_INTERVAL):
+def _start_periodic_gc(session, interval=None):
+    if interval is None:
+        interval = constants.GC_INTERVAL
     stop_event = threading.Event()
 
     def _gc_loop():
@@ -89,7 +91,14 @@ def create_sniffer(
         attack=attack
     )
 
-    _start_periodic_gc(session, interval=GC_INTERVAL)
+    # Select constants profile based on input source
+    # - offline file -> 'offline' profile
+    # - live interface -> 'realtime' profile
+    constants.set_profile('offline' if input_file else 'realtime')
+
+    # Start periodic GC only for live capture (wall-clock driven)
+    if input_interface:
+        _start_periodic_gc(session, interval=constants.GC_INTERVAL)
 
     if input_file:
         sniffer = AsyncSniffer(
@@ -242,7 +251,7 @@ def main():
 
     try:
         while sniffer.running:
-            time.sleep(CHECK_INTERVAL)  # Sleep briefly to avoid busy waiting
+            time.sleep(constants.CHECK_INTERVAL)  # Sleep briefly to avoid busy waiting
 
             # Check max flows condition
             if args.max_flows and session.flow_count >= args.max_flows:

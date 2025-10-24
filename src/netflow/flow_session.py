@@ -4,7 +4,7 @@ from scapy.sessions import DefaultSession
 
 from netflow.writer import output_writer_factory
 
-from .constants import EXPIRED_UPDATE, PACKETS_PER_GC
+from . import constants
 from .features.context import PacketDirection, get_packet_flow_key
 from .flow import Flow
 from .utils import get_logger
@@ -81,11 +81,11 @@ class FlowSession(DefaultSession):
             with self._lock:
                 self.flows[(packet_flow_key, count)] = flow
 
-        elif (pkt.time - flow.latest_timestamp) > EXPIRED_UPDATE:
-            expired = EXPIRED_UPDATE
+        elif (pkt.time - flow.latest_timestamp) > constants.EXPIRED_UPDATE:
+            expired = constants.EXPIRED_UPDATE
             while (pkt.time - flow.latest_timestamp) > expired:
                 count += 1
-                expired += EXPIRED_UPDATE
+                expired += constants.EXPIRED_UPDATE
                 with self._lock:
                     flow = self.flows.get((packet_flow_key, count))
 
@@ -104,7 +104,7 @@ class FlowSession(DefaultSession):
         flow.add_packet(pkt, direction)
 
         # call garbage_collect only occasionally; the background GC thread will cover periodic execution
-        if self.packets_count % PACKETS_PER_GC == 0 or flow.duration > 120:
+        if self.packets_count % constants.PACKETS_PER_GC == 0 or flow.duration > 120:
             self.garbage_collect(pkt.time)
 
         self.logger.debug(f"Packet {self.packets_count}: {pkt}")
@@ -131,7 +131,7 @@ class FlowSession(DefaultSession):
                 flow = self.flows.get(k)
             if not flow or (
                 latest_time is not None
-                and latest_time - flow.latest_timestamp < EXPIRED_UPDATE
+                and latest_time - flow.latest_timestamp < constants.EXPIRED_UPDATE
                 and flow.duration < 90
             ):
                 continue
