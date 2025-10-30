@@ -46,21 +46,24 @@ netflow_ndpi/
 ### Usage
 
 ```sh
-usage: netflow [-h] (-i INPUT_INTERFACE | -f INPUT_FILE) (-c | -u) [--fields FIELDS | --version VERSION] [--max-flows MAX_FLOWS] [--max-time MAX_TIME] [--no-label | --attack ATTACK]
-               [--filter BPF_FILTER] [-v]
-               output
+usage: netflow [-h] [-i INPUT_INTERFACE | -f INPUT_FILE] (-c | -u | -w) [--host WEB_HOST] [--port WEB_PORT] [--fields FIELDS | --version VERSION] [--max-flows MAX_FLOWS]
+               [--max-time MAX_TIME] [--no-label | --attack ATTACK] [--filter BPF_FILTER] [-v]
+               [output]
 
 positional arguments:
   output                output file name (in csv mode) or url (in url mode)
 
 options:
   -h, --help            show this help message and exit
-  -i, --interface INPUT_INTERFACE
+  -i INPUT_INTERFACE, --interface INPUT_INTERFACE
                         capture online data from INPUT_INTERFACE
-  -f, --file INPUT_FILE
+  -f INPUT_FILE, --file INPUT_FILE
                         capture offline data from INPUT_FILE
   -c, --csv             output flows as csv
   -u, --url             output flows as request to url
+  -w, --web             start web-based GUI for real-time visualization and intrusion detection
+  --host WEB_HOST       web GUI host address (default: 127.0.0.1, use 0.0.0.0 for all interfaces)
+  --port WEB_PORT       web GUI port (default: 5000)
   --fields FIELDS       comma separated fields to include in output (default: all)
   --version VERSION     which version of NetFlow features to include (support: 1,2,3) (default: 2)
   --max-flows MAX_FLOWS
@@ -92,8 +95,15 @@ Sniff packets real-time from interface to flow csv with custom fields without la
 sudo .venv/bin/netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,PROTOCOL,L7_PROTO" --max-time 60 --no-label
 ```
 
+Web GUI for real-time visualization and intrusion detection:
+
+```
+sudo .venv/bin/netflow -w -i eth0 --host localhost --port 5000
+```
+
 ### References:
 
 1. https://staff.itee.uq.edu.au/marius/NIDS_datasets/
 2. https://github.com/hieulw/cicflowmeter
 3. https://github.com/ntop/nDPI
+4. https://github.com/HoangNV2001/Real-time-IDS/tree/master

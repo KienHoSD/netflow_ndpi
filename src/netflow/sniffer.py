@@ -27,11 +27,8 @@ def _start_periodic_gc(session, interval=GC_INTERVAL):
 
 
 def create_sniffer(
-    input_file, input_interface, output_mode, output, fields=None, version=None, verbose=False, max_flows=None, max_time=None, label=None, attack=None, bpf_filter=None
+    input_file, input_interface, output_mode, output, fields=None, version=None, verbose=False, max_flows=None, max_time=None, label=None, attack=None, bpf_filter=None, web_listen=None
 ):
-    assert (input_file is None) ^ (input_interface is None), (
-        "Either provide interface input or file input not both"
-    )
     if fields is not None:
         fields = fields.split(",")
 
@@ -77,9 +74,6 @@ def create_sniffer(
         if "Attack" in fields:
             fields.remove("Attack")
 
-    if bpf_filter is None:
-        bpf_filter = "ip and (tcp or udp or icmp)"
-
     # Pass config to FlowSession constructor
     session = FlowSession(
         output_mode=output_mode,
@@ -113,7 +107,8 @@ def create_sniffer(
 def main():
     parser = argparse.ArgumentParser()
 
-    input_group = parser.add_mutually_exclusive_group(required=True)
+    # Only require one of -i / -f when not using web GUI
+    input_group = parser.add_mutually_exclusive_group(required=False)
     input_group.add_argument(
         "-i",
         "--interface",
@@ -146,10 +141,38 @@ def main():
         dest="output_mode",
         help="output flows as request to url",
     )
+    output_group.add_argument(
+        "-w",
+        "--web",
+        action="store_const",
+        const="web_gui",
+        dest="output_mode",
+        help="start web-based GUI for real-time visualization and intrusion detection",
+    )
 
     parser.add_argument(
         "output",
         help="output file name (in csv mode) or url (in url mode)",
+        nargs="?",
+        default=None
+    )
+
+    # Web GUI specific options
+    parser.add_argument(
+        "--host",
+        action="store",
+        dest="web_host",
+        default="127.0.0.1",
+        help="web GUI host address (default: 127.0.0.1, use 0.0.0.0 for all interfaces)",
+    )
+    
+    parser.add_argument(
+        "--port",
+        action="store",
+        type=int,
+        dest="web_port",
+        default=5000,
+        help="web GUI port (default: 5000)",
     )
 
     include_fields = parser.add_mutually_exclusive_group(required=False)
@@ -209,6 +232,42 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true", help="more verbose")
 
     args = parser.parse_args()
+
+    if args.output_mode == "web_gui":
+        try:
+            from netflow.web_gui import app, socketio, set_capture_interface, set_filter
+            
+            # Set the interface if provided
+            if args.input_interface:
+                set_capture_interface(args.input_interface)
+            else:
+                set_capture_interface(None)  # Capture from all interfaces
+            set_filter(args.bpf_filter)
+            
+            host = args.web_host
+            port = args.web_port
+            print("=" * 60)
+            print(f"Starting NetFlow Web GUI")
+            print("=" * 60)
+            if args.input_interface:
+                print(f"Interface    : {args.input_interface}")
+            else:
+                print(f"Interface    : All interfaces")
+            print(f"BPF Filter   : {args.bpf_filter}")
+            print(f"Web Address  : http://{host}:{port}")
+            print("=" * 60)
+            print(f"\nOpen http://{host}:{port} in your browser to view the dashboard")
+            print("Press Ctrl+C to stop\n")
+            socketio.run(app, host=host, port=port, debug=args.verbose)
+            return
+        except ImportError as e:
+            print(f"Error: Web GUI dependencies not installed. Please install them first.")
+            print(f"Run: pip install flask flask-socketio pandas torch dgl networkx category-encoders scikit-learn catboost plotly")
+            print(f"Error details: {e}")
+            return
+        except Exception as e:
+            print(f"Error starting Web GUI: {e}")
+            return
 
     sniffer, session = create_sniffer(
         args.input_file,
