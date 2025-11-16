@@ -232,12 +232,16 @@ cols_to_norm = [col for col in netflow_features if col not in categorical_cols]
 # Load models
 print("Loading models...")
 try:
+    # Select device (Use CPU for simplicity)
+    device = 'cpu'
+    print(f"Using device: {device}")
+
     # Load DGI model
     ndim_in = 39  # number of features after encoding (without IPs, Ports)
     edim = len(netflow_features)
     dgi_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
-    dgi_model.load_state_dict(torch.load(
-        'src/netflow/models/best_dgi_CSE_real_traffic.pkl', map_location=torch.device('cuda')))
+    dgi_model.load_state_dict(torch.load('src/netflow/models/best_dgi_CSE_real_traffic.pkl', map_location=device))
+    dgi_model.to(device)
     dgi_model.eval()
 
     # Load CatBoost classifier
@@ -323,16 +327,17 @@ def process_flow_batch(flows_data):
         # Convert to DGL
         g_dgl = dgl.from_networkx(g, edge_attrs=['h'])
 
-        # Initialize node features
-        # Node features should match the actual number of nodes in the graph
-        nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(netflow_features)])
-        g_dgl.ndata['h'] = torch.reshape(nfeat_weight,
-                                         (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
+        # Initialize node features on the correct device
+        nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(netflow_features)], device=device)
+        g_dgl.ndata['h'] = torch.reshape(nfeat_weight, (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
 
-        # Reshape edge features
+        # Reshape edge features and ensure they are on the device
         g_dgl.edata['h'] = torch.reshape(g_dgl.edata['h'],
                                          (g_dgl.edata['h'].shape[0], 1,
-                                          g_dgl.edata['h'].shape[1]))
+                                          g_dgl.edata['h'].shape[1])).to(device)
+
+        # Move graph data to device (DGL will keep graph structure and move tensors)
+        g_dgl = g_dgl.to(device)
 
         # Get embeddings from DGI
         with torch.no_grad():
@@ -342,12 +347,7 @@ def process_flow_batch(flows_data):
         # Multimodal (Fusion) Learning: Combine embeddings with raw features
         # This matches the training approach in the notebook
         df_emb = pd.DataFrame(embeddings)
-
-        # Need to map embeddings back to original flows using edge indices
-        # For now, assume edge order matches flow order in the batch, exclude the h column
         df_raw = X.copy().drop(columns=['h'])
-
-        # Concatenate embeddings with raw features
         df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
 
         # Predict using CatBoost on fused features
@@ -375,7 +375,6 @@ def process_flow_batch(flows_data):
             else:
                 risk = "<p style=\"color:limegreen;\">Minimal</p>"
 
-            # Map prediction to attack type
             attack_types = ['Benign', 'Brute Force -Web', 'Brute Force -XSS',
                             'DoS attacks-GoldenEye', 'DoS attacks-Hulk',
                             'DoS attacks-SlowHTTPTest', 'DoS attacks-Slowloris',
