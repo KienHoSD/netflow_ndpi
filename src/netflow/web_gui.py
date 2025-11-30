@@ -216,10 +216,12 @@ cols = ['FlowID'] + netflow_features + [
 
 flow_count = 0
 flow_df = pd.DataFrame(columns=cols)
+MAX_FLOW_HISTORY = 1000  # Keep only recent flows to limit memory
 
 src_ip_dict = {}
 current_flows = {}
 FlowTimeout = 600
+MAX_ACTIVE_FLOWS = 200  # Limit concurrent flows
 
 # Categorical columns that need encoding
 categorical_cols = ['TCP_FLAGS', 'L7_PROTO', 'PROTOCOL', 'CLIENT_TCP_FLAGS',
@@ -343,12 +345,18 @@ def process_flow_batch(flows_data):
         with torch.no_grad():
             embeddings = dgi_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
             embeddings = embeddings.detach().cpu().numpy()
+        
+        # Memory cleanup: delete graph objects after use
+        del g_dgl, g, temp_df, nfeat_weight
 
         # Multimodal (Fusion) Learning: Combine embeddings with raw features
         # This matches the training approach in the notebook
         df_emb = pd.DataFrame(embeddings)
         df_raw = X.copy().drop(columns=['h'])
         df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
+        
+        # Memory cleanup
+        del df_emb, embeddings
 
         # Predict using CatBoost on fused features
         predictions = catboost_model.predict(df_fuse)
@@ -402,7 +410,7 @@ def classify(flow_data, flow_obj=None):
         flow_data: Dictionary of flow features
         flow_obj: Optional Flow object for accessing nDPI detected protocol
     """
-    global flow_count, flow_buffer, flow_objects_buffer
+    global flow_count, flow_buffer, flow_objects_buffer, flow_df
 
     # Extract features
     features = extract_flow_features(flow_data)
@@ -478,6 +486,10 @@ def classify(flow_data, flow_obj=None):
                 ]
 
                 flow_df.loc[len(flow_df)] = record
+                
+                # Memory optimization: Keep only recent flows
+                if len(flow_df) > MAX_FLOW_HISTORY:
+                    flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
 
                 # Log
                 w.writerow([f'Flow #{current_flow_id}'])
@@ -559,6 +571,14 @@ def classify(flow_data, flow_obj=None):
 def newPacket(packet: Packet):
     """Process a new packet and update flows"""
     try:
+        # Memory protection: limit active flows
+        if len(current_flows) >= MAX_ACTIVE_FLOWS:
+            # Force cleanup of oldest flows
+            oldest_key = min(current_flows.keys(), key=lambda k: current_flows[k].latest_timestamp)
+            flow_data = current_flows[oldest_key].get_data()
+            classify(flow_data, current_flows[oldest_key])
+            del current_flows[oldest_key]
+        
         # Get flow key
         direction = PacketDirection.FORWARD
         flow_key = get_packet_flow_key(packet, direction)
