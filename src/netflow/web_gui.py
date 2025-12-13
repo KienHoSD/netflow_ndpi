@@ -188,10 +188,15 @@ thread_stop_event = Event()
 # Configuration for packet capture
 capture_interface = None  # None means capture from all interfaces
 
-f = open("output_logs.csv", 'w')
+# Logging files
+f = open("output_logs.csv", 'w', newline='')
 w = csv.writer(f)
-f2 = open("input_logs.csv", 'w')
+f2 = open("input_logs.csv", 'w', newline='')
 w2 = csv.writer(f2)
+
+# Flow CSV export
+flows_csv_file = None  # Start as None, will be set when needed
+flows_csv_writer = None  # Start as None, will be set when needed
 
 
 # NetFlow feature columns based on your training data
@@ -486,6 +491,11 @@ def classify(flow_data, flow_obj=None):
                 ]
 
                 flow_df.loc[len(flow_df)] = record
+
+                # Persist to CSV (if enabled)
+                if flows_csv_writer is not None:
+                    flows_csv_writer.writerow(record)
+                    flows_csv_file.flush()
                 
                 # Memory optimization: Keep only recent flows
                 if len(flow_df) > MAX_FLOW_HISTORY:
@@ -539,6 +549,11 @@ def classify(flow_data, flow_obj=None):
                     risk
                 ]
                 flow_df.loc[len(flow_df)] = record
+
+                # Persist placeholder to CSV (if enabled)
+                if flows_csv_writer is not None:
+                    flows_csv_writer.writerow(record)
+                    flows_csv_file.flush()
 
                 ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
@@ -864,6 +879,29 @@ def set_filter(bpf_filter=""):
     global filter
     filter = bpf_filter
     print(f"Capture filter set to: {bpf_filter}")
+
+def set_output_file(file_path=None):
+    """Set output CSV file path (optional)"""
+    global flows_csv_file, flows_csv_writer
+    
+    # Close existing file if open
+    if flows_csv_file is not None:
+        try:
+            flows_csv_file.close()
+        except Exception:
+            pass
+    
+    # Only open and write header if file_path is provided
+    if file_path is not None:
+        flows_csv_file = open(file_path, 'w', newline='')
+        flows_csv_writer = csv.writer(flows_csv_file)
+        # Write header
+        flows_csv_writer.writerow(cols)
+        print(f"Output file set to: {file_path}")
+    else:
+        flows_csv_file = None
+        flows_csv_writer = None
+        print("CSV export disabled (no output file specified)")
 
 
 if __name__ == '__main__':

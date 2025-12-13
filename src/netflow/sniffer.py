@@ -152,7 +152,7 @@ def main():
 
     parser.add_argument(
         "output",
-        help="output file name (in csv mode) or url (in url mode)",
+        help="output file name (in csv mode) or url (in url mode), optional for web GUI",
         nargs="?",
         default=None
     )
@@ -235,7 +235,7 @@ def main():
 
     if args.output_mode == "web_gui":
         try:
-            from netflow.web_gui import app, socketio, set_capture_interface, set_filter
+            from netflow.web_gui import app, socketio, set_capture_interface, set_filter, set_output_file
             
             # Set the interface if provided
             if args.input_interface:
@@ -255,6 +255,10 @@ def main():
                 print(f"Interface    : All interfaces")
             print(f"BPF Filter   : {args.bpf_filter}")
             print(f"Web Address  : http://{host}:{port}")
+            if args.output:
+                set_output_file(args.output)
+            else:
+                set_output_file(None)
             print("=" * 60)
             print(f"\nOpen http://{host}:{port} in your browser to view the dashboard")
             print("Press Ctrl+C to stop\n")
