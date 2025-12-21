@@ -257,8 +257,10 @@ def main():
             print(f"Web Address  : http://{host}:{port}")
             if args.output:
                 set_output_file(args.output)
+                print(f"Output file  : {args.output}")
             else:
                 set_output_file(None)
+                print("CSV export disabled (no output file specified)")
             print("=" * 60)
             print(f"\nOpen http://{host}:{port} in your browser to view the dashboard")
             print("Press Ctrl+C to stop\n")

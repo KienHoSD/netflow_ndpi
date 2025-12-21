@@ -216,7 +216,7 @@ netflow_features = [
 cols = ['FlowID'] + netflow_features + [
     'IPV4_SRC_ADDR', 'L4_SRC_PORT', 'IPV4_DST_ADDR', 'L4_DST_PORT',
     'FLOW_START_MILLISECONDS', 'FLOW_END_MILLISECONDS',
-    'Classification', 'Probability', 'Risk'
+    'Classification', 'Probability', 'Risk', 'All_Probabilities'
 ]
 
 flow_count = 0
@@ -253,7 +253,7 @@ try:
 
     # Load CatBoost classifier
     catboost_model = CatBoostClassifier()
-    catboost_model.load_model('src/netflow/models/best_catboost_classifier_unsw_fuse.cbm')
+    catboost_model.load_model('src/netflow/models/best_catboost_classifier_fused.cbm')
 
     # Initialize encoder and scaler (will be fitted on first batch)
     encoder = ce.TargetEncoder(cols=categorical_cols)
@@ -388,16 +388,34 @@ def process_flow_batch(flows_data):
             else:
                 risk = "<p style=\"color:limegreen;\">Minimal</p>"
 
-            attack_types = ['Benign', 'Brute Force -Web', 'Brute Force -XSS',
-                            'DoS attacks-GoldenEye', 'DoS attacks-Hulk',
-                            'DoS attacks-SlowHTTPTest', 'DoS attacks-Slowloris',
-                            'FTP-BruteForce', 'Infilteration', 'SQL Injection',
-                            'SSH-Bruteforce']
+            # attack_types = ['Benign', 'Brute Force -Web', 'Brute Force -XSS',
+            #                 'DoS attacks-GoldenEye', 'DoS attacks-Hulk',
+            #                 'DoS attacks-SlowHTTPTest', 'DoS attacks-Slowloris',
+            #                 'FTP-BruteForce', 'Infilteration', 'SQL Injection',
+            #                 'SSH-Bruteforce'] # UNSW-NB15 types
+            attack_types = ['Benign', 'FTP-BruteForce', 'SSH-Bruteforce',
+                            'DoS_attacks-GoldenEye', 'DoS_attacks-Slowloris',
+                            'DoS_attacks-SlowHTTPTest', 'DoS_attacks-Hulk',
+                            'DDoS_attacks-LOIC-HTTP', 'DDOS_attack-LOIC-UDP',
+                            'DDOS_attack-HOIC', 'Brute_Force_-Web', 'Brute_Force_-XSS',
+                            'SQL_Injection', 'Infilteration', 'Bot'] # CIC-IDS2017 types
             classification = attack_types[int(pred)] if int(pred) < len(attack_types) else 'Unknown'
+
+            # Create probability breakdown for all attack types
+            all_probabilities = {}
+            for idx, attack_type in enumerate(attack_types):
+                if idx < len(proba):
+                    all_probabilities[attack_type] = float(proba[idx])
+            
+            # Sort by probability (descending)
+            sorted_probs = sorted(all_probabilities.items(), key=lambda x: x[1], reverse=True)
+            prob_str = ', '.join([f"{attack}: {prob*100:.1f}%" for attack, prob in sorted_probs])
 
             results.append({
                 'classification': classification,
                 'probability': max_proba,
+                'all_probabilities': all_probabilities,
+                'probability_str': prob_str,
                 'risk': risk
             })
 
@@ -475,6 +493,7 @@ def classify(flow_data, flow_obj=None):
 
                 classification = result['classification']
                 proba_score = result['probability']
+                probability_str = result.get('probability_str', '')
                 risk = result['risk']
 
                 # Create record
@@ -487,7 +506,8 @@ def classify(flow_data, flow_obj=None):
                     flow_features['FLOW_END_MILLISECONDS'],
                     classification,
                     proba_score,
-                    risk
+                    risk,
+                    json.dumps(result.get('all_probabilities', {}))
                 ]
 
                 flow_df.loc[len(flow_df)] = record
@@ -504,6 +524,7 @@ def classify(flow_data, flow_obj=None):
                 # Log
                 w.writerow([f'Flow #{current_flow_id}'])
                 w.writerow(['Classification:'] + [classification] + [proba_score])
+                w.writerow(['All Probabilities:'] + [probability_str])
                 w.writerow(
                     ['--------------------------------------------------------------------------------------------------'])
 
@@ -527,7 +548,9 @@ def classify(flow_data, flow_obj=None):
                 display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
                                 protocol, flow_start, flow_end, app_name, pid, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display_data,
-                              "ips": json.loads(ip_data_json)}, namespace='/test')
+                              "ips": json.loads(ip_data_json),
+                              "all_probs": result.get('all_probabilities', {}),
+                              "prob_str": probability_str}, namespace='/test')
         else:
             # Fallback: emit placeholder rows so UI is not empty
             for idx, flow_features in enumerate(flow_buffer):
@@ -546,7 +569,8 @@ def classify(flow_data, flow_obj=None):
                     flow_features.get('FLOW_END_MILLISECONDS', 0),
                     classification,
                     proba_score,
-                    risk
+                    risk,
+                    json.dumps({})
                 ]
                 flow_df.loc[len(flow_df)] = record
 
@@ -574,7 +598,9 @@ def classify(flow_data, flow_obj=None):
                 display = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport, protocol,
                            flow_start, flow_end, app_name, pid, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display,
-                              "ips": json.loads(ip_data_json)}, namespace='/test')
+                              "ips": json.loads(ip_data_json),
+                              "all_probs": {},
+                              "prob_str": ""}, namespace='/test')
 
         # Clear buffers
         flow_buffer = []
@@ -749,6 +775,20 @@ def flow_detail():
     classification = flow['Classification'].values[0] if 'Classification' in flow.columns else 'Unknown'
     risk = flow['Risk'].values[0] if 'Risk' in flow.columns else 'Unknown'
     probability = flow['Probability'].values[0] if 'Probability' in flow.columns else 0.0
+    
+    # Get all probabilities
+    all_probs_json = flow['All_Probabilities'].values[0] if 'All_Probabilities' in flow.columns else '{}'
+    try:
+        all_probs = json.loads(all_probs_json)
+    except:
+        all_probs = {}
+    
+    # Sort by probability descending
+    sorted_probs = sorted(all_probs.items(), key=lambda x: x[1], reverse=True)
+    prob_html = '<table class="table table-striped"><tr><th>Attack Type</th><th>Probability</th></tr>'
+    for attack_type, prob in sorted_probs:
+        prob_html += f'<tr><td>{attack_type}</td><td>{prob*100:.2f}%</td></tr>'
+    prob_html += '</table>'
 
     # Create simple feature importance plot using top features
     feature_values = {}
@@ -775,7 +815,8 @@ def flow_detail():
         tables=[flow.reset_index(drop=True).transpose().to_html(classes='data')],
         exp=f"<h3>Classification: {classification}</h3><p>Probability: {probability:.4f}</p>",
         ae_plot=plot_div,
-        risk=f"Risk: {risk}"
+        risk=f"Risk: {risk}",
+        all_probs_table=prob_html
     )
 
 
@@ -897,11 +938,9 @@ def set_output_file(file_path=None):
         flows_csv_writer = csv.writer(flows_csv_file)
         # Write header
         flows_csv_writer.writerow(cols)
-        print(f"Output file set to: {file_path}")
     else:
         flows_csv_file = None
         flows_csv_writer = None
-        print("CSV export disabled (no output file specified)")
 
 
 if __name__ == '__main__':
