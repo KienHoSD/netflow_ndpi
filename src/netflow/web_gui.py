@@ -1,5 +1,5 @@
 from flask_socketio import SocketIO, emit
-from flask import Flask, render_template, url_for, copy_current_request_context, request
+from flask import Flask, render_template, url_for, copy_current_request_context, request, jsonify
 from random import random
 from time import sleep
 from threading import Thread, Event
@@ -38,7 +38,11 @@ from ndpi import NDPI
 
 import warnings
 import time
+import os
 warnings.filterwarnings("ignore")
+
+# Get the directory of this module for relative path resolution
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def ipInfo(addr=''):
@@ -215,18 +219,17 @@ netflow_features = [
 
 cols = ['FlowID'] + netflow_features + [
     'IPV4_SRC_ADDR', 'L4_SRC_PORT', 'IPV4_DST_ADDR', 'L4_DST_PORT',
-    'FLOW_START_MILLISECONDS', 'FLOW_END_MILLISECONDS',
-    'Classification', 'Probability', 'Risk', 'All_Probabilities'
+    'Attack', 'Label', 'Probability', 'Risk', 'All_Probabilities'
 ]
 
 flow_count = 0
 flow_df = pd.DataFrame(columns=cols)
 MAX_FLOW_HISTORY = 1000  # Keep only recent flows to limit memory
+MAX_ACTIVE_FLOWS = 100  # Limit concurrent flows
+FlowTimeout = 600
 
 src_ip_dict = {}
 current_flows = {}
-FlowTimeout = 600
-MAX_ACTIVE_FLOWS = 200  # Limit concurrent flows
 
 # Categorical columns that need encoding
 categorical_cols = ['TCP_FLAGS', 'L7_PROTO', 'PROTOCOL', 'CLIENT_TCP_FLAGS',
@@ -247,13 +250,15 @@ try:
     ndim_in = 39  # number of features after encoding (without IPs, Ports)
     edim = len(netflow_features)
     dgi_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
-    dgi_model.load_state_dict(torch.load('src/netflow/models/best_dgi_CSE_merged_traffic.pkl', map_location=device))
+    dgi_model_path = os.path.join(MODULE_DIR, 'models', 'best_dgi_CSE_merged_traffic.pkl')
+    dgi_model.load_state_dict(torch.load(dgi_model_path, map_location=device))
     dgi_model.to(device)
     dgi_model.eval()
 
     # Load CatBoost classifier
     catboost_model = CatBoostClassifier()
-    catboost_model.load_model('src/netflow/models/best_catboost_classifier_fused.cbm')
+    catboost_model_path = os.path.join(MODULE_DIR, 'models', 'best_catboost_classifier_fused.cbm')
+    catboost_model.load_model(catboost_model_path)
 
     # Initialize encoder and scaler (will be fitted on first batch)
     encoder = ce.TargetEncoder(cols=categorical_cols)
@@ -282,8 +287,6 @@ def extract_flow_features(flow_data):
     features['IPV4_DST_ADDR'] = str(flow_data.get('IPV4_DST_ADDR', '0.0.0.0'))
     features['L4_SRC_PORT'] = str(flow_data.get('L4_SRC_PORT', 0))
     features['L4_DST_PORT'] = str(flow_data.get('L4_DST_PORT', 0))
-    features['FLOW_START_MILLISECONDS'] = flow_data.get('FLOW_START_MILLISECONDS', 0)
-    features['FLOW_END_MILLISECONDS'] = flow_data.get('FLOW_END_MILLISECONDS', 0)
 
     return features
 
@@ -497,14 +500,14 @@ def classify(flow_data, flow_obj=None):
                 risk = result['risk']
 
                 # Create record
+                label = 0 if classification == 'Benign' else 1
                 record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
                     flow_features['IPV4_SRC_ADDR'],
                     flow_features['L4_SRC_PORT'],
                     flow_features['IPV4_DST_ADDR'],
                     flow_features['L4_DST_PORT'],
-                    flow_features['FLOW_START_MILLISECONDS'],
-                    flow_features['FLOW_END_MILLISECONDS'],
                     classification,
+                    label,
                     proba_score,
                     risk,
                     json.dumps(result.get('all_probabilities', {}))
@@ -523,7 +526,7 @@ def classify(flow_data, flow_obj=None):
 
                 # Log
                 output_log.writerow([f'Flow #{current_flow_id}'])
-                output_log.writerow(['Classification:'] + [classification] + [proba_score])
+                output_log.writerow(['Attack:'] + [classification] + [proba_score])
                 output_log.writerow(['All Probabilities:'] + [probability_str])
                 output_log.writerow(
                     ['--------------------------------------------------------------------------------------------------'])
@@ -539,14 +542,13 @@ def classify(flow_data, flow_obj=None):
                 disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
                 disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
                 protocol = flow_features.get('PROTOCOL', 0)
-                flow_start = flow_features.get('FLOW_START_MILLISECONDS', 0)
-                flow_end = flow_features.get('FLOW_END_MILLISECONDS', 0)
+                flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                 # Get app name from nDPI using Flow object
                 app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
                 pid = 'N/A'
 
                 display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                                protocol, flow_start, flow_end, app_name, pid, classification, proba_score, risk]
+                                protocol, flow_duration, app_name, pid, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display_data,
                               "ips": json.loads(ip_data_json),
                               "all_probs": result.get('all_probabilities', {}),
@@ -557,17 +559,16 @@ def classify(flow_data, flow_obj=None):
                 current_flow_id = flow_count - len(flow_buffer) + idx + 1
                 flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
                 classification = 'Pending'
+                label = 1  # Treat pending as potentially malicious
                 proba_score = 0.0
                 risk = 'Processing'
-
                 record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
                     flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'),
                     flow_features.get('L4_SRC_PORT', '0'),
                     flow_features.get('IPV4_DST_ADDR', '0.0.0.0'),
                     flow_features.get('L4_DST_PORT', '0'),
-                    flow_features.get('FLOW_START_MILLISECONDS', 0),
-                    flow_features.get('FLOW_END_MILLISECONDS', 0),
                     classification,
+                    label,
                     proba_score,
                     risk,
                     json.dumps({})
@@ -583,20 +584,18 @@ def classify(flow_data, flow_obj=None):
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
 
                 # Format display data to match table columns:
-                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow start time, Flow last seen, App name, PID, Prediction, Prob, Risk
+                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow duration, App name, PID, Prediction, Prob, Risk
                 disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
                 disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
                 disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
                 disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
                 protocol = flow_features.get('PROTOCOL', 0)
-                flow_start = flow_features.get('FLOW_START_MILLISECONDS', 0)
-                flow_end = flow_features.get('FLOW_END_MILLISECONDS', 0)
-                # Get app name from nDPI using Flow object
+                flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                 app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
                 pid = 'N/A'
 
                 display = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport, protocol,
-                           flow_start, flow_end, app_name, pid, classification, proba_score, risk]
+                           flow_duration, app_name, pid, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display,
                               "ips": json.loads(ip_data_json),
                               "all_probs": {},
@@ -608,6 +607,78 @@ def classify(flow_data, flow_obj=None):
 
     return feature_string + ['Pending...', 0.0, 'Processing']
 
+
+# ---- Pagination and history helpers ----
+def get_flows_dataframe():
+    """Return DataFrame of all flows, preferring persisted CSV if available."""
+    try:
+        # If CSV writer is active, use in-memory DataFrame (has latest rows)
+        if flows_csv_writer is not None:
+            return flow_df.copy()
+        # Fall back to reading default CSV on disk if present
+        import os
+        default_path = os.path.join(os.getcwd(), 'flows.csv')
+        if os.path.exists(default_path):
+            return pd.read_csv(default_path)
+    except Exception:
+        pass
+    # Default to current in-memory DataFrame
+    return flow_df.copy()
+
+@app.route('/api/flows')
+def api_flows():
+    """Server-side pagination for flows. Returns JSON.
+    Query params: page (1-based), page_size (default 1000)
+    """
+    try:
+        page = int(request.args.get('page', 1))
+        page_size = int(request.args.get('page_size', 1000))
+    except Exception:
+        page, page_size = 1, 1000
+
+    df = get_flows_dataframe()
+    if 'FlowID' in df.columns:
+        df = df.sort_values(by='FlowID')
+
+    total = len(df)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_df = df.iloc[start:end]
+
+    # Build display arrays to match frontend table schema
+    data = []
+    for _, row in page_df.iterrows():
+        protocol = row.get('PROTOCOL', 0)
+        duration = row.get('FLOW_DURATION_MILLISECONDS', 0)
+        app_name = 'Unknown'
+        pid = 'N/A'
+        display = [
+            int(row.get('FlowID', 0)),
+            str(row.get('IPV4_SRC_ADDR', '0.0.0.0')),
+            str(row.get('L4_SRC_PORT', '0')),
+            str(row.get('IPV4_DST_ADDR', '0.0.0.0')),
+            str(row.get('L4_DST_PORT', '0')),
+            protocol,
+            str(duration),
+            app_name,
+            pid,
+            row.get('Attack', 'Pending'),
+            row.get('Probability', 0.0),
+            row.get('Risk', 'Processing')
+        ]
+        data.append(display)
+
+    return jsonify({
+        'page': page,
+        'page_size': page_size,
+        'total': total,
+        'total_pages': total_pages,
+        'is_last_page': page >= total_pages,
+        'data': data
+    })
 
 def newPacket(packet: Packet):
     """Process a new packet and update flows"""
@@ -771,8 +842,8 @@ def flow_detail():
     if len(flow) == 0:
         return "Flow not found", 404
 
-    # Get flow classification and risk
-    classification = flow['Classification'].values[0] if 'Classification' in flow.columns else 'Unknown'
+    # Get flow attack classification and risk
+    classification = flow['Attack'].values[0] if 'Attack' in flow.columns else 'Unknown'
     risk = flow['Risk'].values[0] if 'Risk' in flow.columns else 'Unknown'
     probability = flow['Probability'].values[0] if 'Probability' in flow.columns else 0.0
     
@@ -813,7 +884,7 @@ def flow_detail():
     return render_template(
         'detail.html',
         tables=[flow.reset_index(drop=True).transpose().to_html(classes='data')],
-        exp=f"<h3>Classification: {classification}</h3><p>Probability: {probability:.4f}</p>",
+        exp=f"<h3>Attack: {classification}</h3><p>Probability: {probability:.4f}</p>",
         ae_plot=plot_div,
         risk=f"Risk: {risk}",
         all_probs_table=prob_html
@@ -871,8 +942,6 @@ def handle_re_evaluation(data):
     features['IPV4_DST_ADDR'] = str(flow_record.get('IPV4_DST_ADDR', '0.0.0.0'))
     features['L4_SRC_PORT'] = flow_record.get('L4_SRC_PORT', 0)
     features['L4_DST_PORT'] = flow_record.get('L4_DST_PORT', 0)
-    features['FLOW_START_MILLISECONDS'] = flow_record.get('FLOW_START_MILLISECONDS', 0)
-    features['FLOW_END_MILLISECONDS'] = flow_record.get('FLOW_END_MILLISECONDS', 0)
 
     # Process single flow
     results = process_flow_batch([features])
@@ -884,13 +953,15 @@ def handle_re_evaluation(data):
         risk = result['risk']
 
         # Update the dataframe
-        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Classification'] = classification
+        label = 0 if classification == 'Benign' else 1
+        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Attack'] = classification
+        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Label'] = label
         flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Probability'] = proba_score
         flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Risk'] = risk
 
         # Log the re-evaluation
         output_log.writerow([f'Re-evaluated Flow #{flow_id}'])
-        output_log.writerow(['Classification:'] + [classification] + [proba_score])
+        output_log.writerow(['Attack:'] + [classification] + [proba_score])
         output_log.writerow(['--------------------------------------------------------------------------------------------------'])
 
         # Emit result back to client
