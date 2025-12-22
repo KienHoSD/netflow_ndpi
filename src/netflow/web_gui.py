@@ -190,9 +190,9 @@ capture_interface = None  # None means capture from all interfaces
 
 # Logging files
 f = open("output_logs.csv", 'w', newline='')
-w = csv.writer(f)
+output_log = csv.writer(f)
 f2 = open("input_logs.csv", 'w', newline='')
-w2 = csv.writer(f2)
+input_logs = csv.writer(f2)
 
 # Flow CSV export
 flows_csv_file = None  # Start as None, will be set when needed
@@ -247,7 +247,7 @@ try:
     ndim_in = 39  # number of features after encoding (without IPs, Ports)
     edim = len(netflow_features)
     dgi_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
-    dgi_model.load_state_dict(torch.load('src/netflow/models/best_dgi_CSE_real_traffic.pkl', map_location=device))
+    dgi_model.load_state_dict(torch.load('src/netflow/models/best_dgi_CSE_merged_traffic.pkl', map_location=device))
     dgi_model.to(device)
     dgi_model.eval()
 
@@ -522,10 +522,10 @@ def classify(flow_data, flow_obj=None):
                     flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
 
                 # Log
-                w.writerow([f'Flow #{current_flow_id}'])
-                w.writerow(['Classification:'] + [classification] + [proba_score])
-                w.writerow(['All Probabilities:'] + [probability_str])
-                w.writerow(
+                output_log.writerow([f'Flow #{current_flow_id}'])
+                output_log.writerow(['Classification:'] + [classification] + [proba_score])
+                output_log.writerow(['All Probabilities:'] + [probability_str])
+                output_log.writerow(
                     ['--------------------------------------------------------------------------------------------------'])
 
                 # Emit to frontend
@@ -889,9 +889,9 @@ def handle_re_evaluation(data):
         flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Risk'] = risk
 
         # Log the re-evaluation
-        w.writerow([f'Re-evaluated Flow #{flow_id}'])
-        w.writerow(['Classification:'] + [classification] + [proba_score])
-        w.writerow(['--------------------------------------------------------------------------------------------------'])
+        output_log.writerow([f'Re-evaluated Flow #{flow_id}'])
+        output_log.writerow(['Classification:'] + [classification] + [proba_score])
+        output_log.writerow(['--------------------------------------------------------------------------------------------------'])
 
         # Emit result back to client
         emit('re_evaluation_result', {

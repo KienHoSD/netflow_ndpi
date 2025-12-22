@@ -98,7 +98,7 @@ sudo .venv/bin/netflow -i eth0 -c flows.csv --fields "IPV4_SRC_ADDR,L4_SRC_PORT,
 Web GUI for real-time visualization and intrusion detection:
 
 ```
-sudo .venv/bin/netflow -w -i eth0 --host localhost --port 5000
+sudo .venv/bin/netflow -w -i eth0 --host localhost --port 5000 flows.csv
 ```
 
 ### References:
