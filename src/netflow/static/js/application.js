@@ -6,6 +6,7 @@ $(document).ready(function(){
     });
     var messages_received = [];
     var currentPage = 1;
+    var maxPageSize = 1000;
     var pageSize = 100;
     var liveMode = true; // live updates only when viewing latest page
     var ctx = document.getElementById("myChart");
@@ -187,12 +188,16 @@ $(document).ready(function(){
         }
         // live mode: append and rebuild (unlimited - no size restriction)
         messages_received.push(msg.result);
+
+        // Trim messages if exceeding maxPageSize (1000)
+        if (messages_received.length > maxPageSize) {
+            messages_received = messages_received.slice(-maxPageSize);
+        }
+
         var stickToBottom = isAtBottom(logContainer);
         rebuildTableFromArray(messages_received);
         if (stickToBottom) scrollToBottom(logContainer);
         scheduleChartUpdate(msg.ips);
-
-
     });
 
     // Handle re-evaluation button clicks

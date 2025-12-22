@@ -483,9 +483,6 @@ def classify(flow_data, flow_obj=None):
     # Extract features
     features = extract_flow_features(flow_data)
 
-    # Increment flow counter
-    flow_count += 1
-
     # Format IP addresses with country flags
     feature_string = []
     for i, ip_key in enumerate(['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']):
@@ -531,7 +528,8 @@ def classify(flow_data, flow_obj=None):
 
             # Emit model-based results
             for idx in range(num_flows):
-                current_flow_id = flow_count - len(flow_buffer) + idx + 1
+                flow_count += 1  # Increment only when actually creating a flow
+                current_flow_id = flow_count
                 flow_features = flow_buffer[idx]
                 flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
                 result = results[idx]
@@ -596,7 +594,8 @@ def classify(flow_data, flow_obj=None):
         else:
             # Fallback: emit placeholder rows so UI is not empty
             for idx, flow_features in enumerate(flow_buffer):
-                current_flow_id = flow_count - len(flow_buffer) + idx + 1
+                flow_count += 1  # Increment only when actually creating a flow
+                current_flow_id = flow_count
                 flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
                 classification = 'Pending'
                 label = 1  # Treat pending as potentially malicious
@@ -684,15 +683,29 @@ def update_flow_in_csv(flow_id, record):
             else:
                 df = pd.DataFrame(columns=cols)
 
-            # Find and update or append the row
-            if flow_id in df['FlowID'].values:
-                idx = df[df['FlowID'] == flow_id].index[0]
+            # Ensure FlowID column is numeric for proper comparison
+            if len(df) > 0 and 'FlowID' in df.columns:
+                df['FlowID'] = pd.to_numeric(df['FlowID'], errors='coerce')
+                # Drop rows with invalid FlowIDs (NaN) instead of converting to 0
+                df = df.dropna(subset=['FlowID'])
+                df['FlowID'] = df['FlowID'].astype(int)
+
+            # Find and update or append the row (ensure flow_id is int)
+            flow_id_int = int(flow_id)
+            matching_rows = df[df['FlowID'] == flow_id_int]
+            
+            if len(matching_rows) > 0:
+                # Update existing row
+                idx = matching_rows.index[0]
                 for i, col in enumerate(cols):
                     if i < len(record):
                         df.at[idx, col] = record[i]
+                print(f"[CSV] Updated existing flow {flow_id_int} in {csv_path}")
             else:
+                # Append new row
                 new_row = {cols[i]: record[i] if i < len(record) else None for i in range(len(cols))}
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                print(f"[CSV] Created new flow {flow_id_int} in {csv_path}")
 
             # Write back to CSV and flush to disk while holding the lock
             df.to_csv(
@@ -702,7 +715,6 @@ def update_flow_in_csv(flow_id, record):
                 lineterminator='\n'
             )
             flows_csv_file.flush()
-            print(f"[CSV] Updated flow {flow_id} in {csv_path}")
         
     except Exception as e:
         print(f"[CSV] Error updating flow {flow_id}: {e}")
@@ -782,7 +794,8 @@ def newPacket(packet: Packet):
                     # Process and emit results immediately
                     num_flows = min(len(results), len(flow_buffer))
                     for idx in range(num_flows):
-                        current_flow_id = int(flow_count - len(flow_buffer) + idx + 1)
+                        flow_count += 1  # Increment only when actually creating a flow
+                        current_flow_id = flow_count
                         flow_features = flow_buffer[idx]
                         flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
                         result = results[idx]
