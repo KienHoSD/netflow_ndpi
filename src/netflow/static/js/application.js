@@ -6,6 +6,9 @@ $(document).ready(function(){
     });
     var messages_received = [];
     var ctx = document.getElementById("myChart");
+    var chartUpdateQueued = false;
+    var chartQueuedData = null;
+    var logContainer = $('#log');
     var myChart = new Chart(ctx, {
         type: 'bar',
         data: {
@@ -46,14 +49,54 @@ $(document).ready(function(){
         }
     });
 
+    // debounced chart updater to avoid lag when many flows arrive quickly
+    function scheduleChartUpdate(ips) {
+        chartQueuedData = ips;
+        if (chartUpdateQueued) {
+            return;
+        }
+        chartUpdateQueued = true;
+        setTimeout(function() {
+            // limit bars to the top 20 to keep rendering light
+            var maxBars = 20;
+            myChart.data.labels = [];
+            myChart.data.datasets[0].data = [];
+            for (var i = 0; i < Math.min(chartQueuedData.length, maxBars); i++) {
+                myChart.data.datasets[0].data.push(chartQueuedData[i].count);
+                myChart.data.labels.push(chartQueuedData[i].SourceIP);
+            }
+            myChart.update(0); // skip animation for faster redraw
+            chartQueuedData = null;
+            chartUpdateQueued = false;
+        }, 2000); // small debounce window
+    }
+
+    function isAtBottom($el) {
+        if (!$el || !$el[0]) {
+            return false;
+        }
+        var node = $el[0];
+        return node.scrollHeight - $el.scrollTop() - $el.outerHeight() <= 5;
+    }
+
+    function scrollToBottom($el) {
+        if ($el && $el[0]) {
+            $el.scrollTop($el[0].scrollHeight);
+        }
+    }
     //receive details from server
     socket.on('newresult', function(msg) {
         console.log("Received result" + msg.result);
         //show all flows - no limit
         messages_received.push(msg.result);
+        // keep only the latest 1000 flows to avoid an ever-growing table
+        if (messages_received.length > 1000) {
+            messages_received = messages_received.slice(-1000);
+        }
+        var stickToBottom = isAtBottom(logContainer);
         messages_string = '<tr><th>Flow ID</th><th>Src IP</th><th>Src Port</th><th>Dst IP</th><th>Dst Port</th><th>Protocol</th><th>Flow start time</th><th>Flow last seen</th><th>App name</th><th>PID</th><th>Prediction</th><th>Prob</th><th>Risk</th><th>Actions</th></tr>';
 
-        for (var i = messages_received.length-1 ; i >= 0; i--){
+        for (var i = 0 ; i < messages_received.length; i++){
             messages_string = messages_string + '<tr>';
             for (var j = 0; j <messages_received[i].length; j++){
                 messages_string = messages_string + '<td>' + messages_received[i][j].toString() + '</td>'; 
@@ -63,20 +106,11 @@ $(document).ready(function(){
 
         }
         $('#details').html(messages_string);
+        if (stickToBottom) {
+            scrollToBottom(logContainer);
+        }
 
-        // var i = 0;
-        // Object.keys(msg.ips).forEach(function(key) {
-        //     myChart.data.datasets[0].data[i] = msg.ips[key] ;
-        //     myChart.data.labels[i] =key;
-        //     i = i+1;
-        //   })
-
-        for (var i=0; i < msg.ips.length; i++) {
-            myChart.data.datasets[0].data[i] =msg.ips[i].count;
-            myChart.data.labels[i] =msg.ips[i].SourceIP;
-           }
-               myChart.update();
-        myChart.update();
+        scheduleChartUpdate(msg.ips);
 
 
     });
@@ -105,7 +139,7 @@ $(document).ready(function(){
         
         // Rebuild the table
         messages_string = '<tr><th>Flow ID</th><th>Src IP</th><th>Src Port</th><th>Dst IP</th><th>Dst Port</th><th>Protocol</th><th>Flow start time</th><th>Flow last seen</th><th>App name</th><th>PID</th><th>Prediction</th><th>Prob</th><th>Risk</th><th>Actions</th></tr>';
-        for (var i = messages_received.length-1 ; i >= 0; i--){
+        for (var i = 0 ; i < messages_received.length; i++){
             messages_string = messages_string + '<tr>';
             for (var j = 0; j <messages_received[i].length; j++){
                 messages_string = messages_string + '<td>' + messages_received[i][j].toString() + '</td>'; 
