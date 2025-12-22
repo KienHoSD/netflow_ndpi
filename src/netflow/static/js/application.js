@@ -6,7 +6,7 @@ $(document).ready(function(){
     });
     var messages_received = [];
     var currentPage = 1;
-    var pageSize = 1000;
+    var pageSize = 100;
     var liveMode = true; // live updates only when viewing latest page
     var ctx = document.getElementById("myChart");
     var chartUpdateQueued = false;
@@ -71,7 +71,7 @@ $(document).ready(function(){
             myChart.update(0); // skip animation for faster redraw
             chartQueuedData = null;
             chartUpdateQueued = false;
-        }, 2000); // small debounce window
+        }, 200); // small debounce window
     }
 
     function isAtBottom($el) {
@@ -102,31 +102,46 @@ $(document).ready(function(){
 
     function loadPage(page) {
         liveMode = false;
-        $.getJSON('/api/flows', { page: page, page_size: pageSize }, function(resp) {
-            currentPage = resp.page;
+        $.getJSON('/api/flows', { page_size: pageSize }, function(resp) {
+            currentPage = 1; // API now returns latest flows only
             messages_received = resp.data || [];
             rebuildTableFromArray(messages_received);
             // update controls text
-            $('#pagination-page').text('Page ' + resp.page + ' / ' + resp.total_pages);
+            $('#pagination-page').text('Static');
         });
     }
 
     // Add simple pagination controls
     var controlsHtml = '<div id="pagination-controls" style="margin: 8px 0;">' +
-        '<button id="prev-page" class="btn btn-sm btn-default">Prev</button> ' +
-        '<span id="pagination-page">Page 1</span> ' +
-        '<button id="next-page" class="btn btn-sm btn-default">Next</button> ' +
+        '<span id="pagination-page">Live</span> ' +
+        '<button id="refresh-page" class="btn btn-sm btn-default">Refresh</button> ' +
         '<button id="live-page" class="btn btn-sm btn-primary">Live</button>' +
+        '<span style="margin-left: 20px;">Page Size (Max:1000):</span> ' +
+        '<input type="number" id="page-size-input" min="1" value="' + pageSize + '" style="width: 80px; margin: 0 5px;"> ' +
+        '<button id="set-page-size" class="btn btn-sm btn-info">Set</button> ' +
+        '<span style="margin-left: 20px;">Flow Range:</span> ' +
+        '<input type="number" id="flow-from" placeholder="From" style="width: 80px; margin: 0 5px;" min="1"> ' +
+        '<input type="number" id="flow-to" placeholder="To" style="width: 80px; margin: 0 5px;" min="1"> ' +
+        '<button id="load-range-btn" class="btn btn-sm btn-warning">Show Range</button>' +
         '</div>';
     $('#content').prepend(controlsHtml);
 
-    $('#prev-page').on('click', function() {
-        if (currentPage > 1) {
-            loadPage(currentPage - 1);
-        }
+    $('#refresh-page').on('click', function() {
+        // Refresh the current paginated view
+        loadPage(currentPage);
     });
-    $('#next-page').on('click', function() {
-        loadPage(currentPage + 1);
+    $('#set-page-size').on('click', function() {
+        var newSize = parseInt($('#page-size-input').val());
+        if (isNaN(newSize) || newSize <= 0) {
+            alert('Please enter a valid page size (> 0)');
+            return;
+        }
+        if (newSize > 1000) {
+            alert('Page size too large, max is 1000');
+            return;
+        }
+        pageSize = newSize;
+        $('#pagination-page').text('Static (page size ' + pageSize + ')');
     });
     $('#live-page').on('click', function() {
         liveMode = true;
@@ -135,17 +150,43 @@ $(document).ready(function(){
         $('#pagination-page').text('Live');
     });
 
+    $('#load-range-btn').on('click', function() {
+        var fromId = parseInt($('#flow-from').val());
+        var toId = parseInt($('#flow-to').val());
+
+        if (isNaN(fromId) || isNaN(toId)) {
+            alert('Please enter valid flow IDs for both From and To');
+            return;
+        }
+
+        if (fromId > toId) {
+            alert('From flow ID must be less than or equal to To flow ID');
+            return;
+        }
+
+        // Filter messages_received to show only flows in the range
+        var filteredFlows = messages_received.filter(function(flow) {
+            return flow[0] >= fromId && flow[0] <= toId;
+        });
+
+        if (filteredFlows.length === 0) {
+            alert('No flows found in the specified range');
+            return;
+        }
+
+        liveMode = false;
+        rebuildTableFromArray(filteredFlows);
+        $('#pagination-page').text('Range: ' + fromId + ' - ' + toId);
+    });
+
     //receive details from server
     socket.on('newresult', function(msg) {
         if (!liveMode) {
             // Ignore live updates while viewing paginated history
             return;
         }
-        // live mode: append and rebuild
+        // live mode: append and rebuild (unlimited - no size restriction)
         messages_received.push(msg.result);
-        if (messages_received.length > pageSize) {
-            messages_received = messages_received.slice(-pageSize);
-        }
         var stickToBottom = isAtBottom(logContainer);
         rebuildTableFromArray(messages_received);
         if (stickToBottom) scrollToBottom(logContainer);

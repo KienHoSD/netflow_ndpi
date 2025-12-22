@@ -154,7 +154,7 @@ def main():
         "output",
         help="output file name (in csv mode) or url (in url mode), optional for web GUI",
         nargs="?",
-        default=None
+        default="flows.csv",
     )
 
     # Web GUI specific options
@@ -255,12 +255,8 @@ def main():
                 print(f"Interface    : All interfaces")
             print(f"BPF Filter   : {args.bpf_filter}")
             print(f"Web Address  : http://{host}:{port}")
-            if args.output:
-                set_output_file(args.output)
-                print(f"Output file  : {args.output}")
-            else:
-                set_output_file('flows.csv')
-                print("CSV export enabled (flows.csv in current folder)")
+            set_output_file(args.output)
+            print(f"Output file  : {args.output}")
             print("=" * 60)
             print(f"\nOpen http://{host}:{port} in your browser to view the dashboard")
             print("Press Ctrl+C to stop\n")

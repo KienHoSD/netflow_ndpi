@@ -2,7 +2,7 @@ from flask_socketio import SocketIO, emit
 from flask import Flask, render_template, url_for, copy_current_request_context, request, jsonify
 from random import random
 from time import sleep
-from threading import Thread, Event
+from threading import Thread, Event, Lock
 
 from scapy.sendrecv import sniff
 from scapy.packet import Packet
@@ -174,7 +174,7 @@ class DGI(nn.Module):
         return l1 + l2
 
 
-__author__ = 'hoang'
+__author__ = 'kiensd'
 
 
 app = Flask(__name__)
@@ -201,6 +201,60 @@ input_logs = csv.writer(f2)
 # Flow CSV export
 flows_csv_file = None  # Start as None, will be set when needed
 flows_csv_writer = None  # Start as None, will be set when needed
+flows_csv_lock: Lock = Lock()  # Synchronize concurrent file access
+
+DEFAULT_CSV_FILENAME = "flows.csv"
+MAX_FLOW_HISTORY = 1000  # Keep only recent flows to limit memory
+MAX_ACTIVE_FLOWS = 100  # Limit concurrent flows (older flows get removed, can not be reclassified)
+FLOW_TIMEOUT = 300 # Flow timeout in seconds
+BATCH_SIZE = 10  # Process flows in batches to create graphs
+
+# Store flows for batch processing
+flow_objects_buffer = []  # Store Flow objects to access nDPI data
+flow_buffer = []
+current_flows = {}
+src_ip_dict = {}
+
+def _ensure_flows_csv(file_path=DEFAULT_CSV_FILENAME):
+    """Lazily open the flows CSV with safe defaults and header if empty."""
+    global flows_csv_file, flows_csv_writer
+
+    with flows_csv_lock:
+        needs_header = False
+
+        if flows_csv_file is None or flows_csv_file.closed:
+            os.makedirs(os.path.dirname(file_path) or "./", exist_ok=True)
+            # Append mode so we don't lose existing rows
+            flows_csv_file = open(file_path, 'a', newline='')
+            needs_header = flows_csv_file.tell() == 0
+            flows_csv_writer = csv.writer(
+                flows_csv_file,
+                quoting=csv.QUOTE_ALL,
+                lineterminator='\n'
+            )
+
+        if needs_header:
+            flows_csv_writer.writerow(cols)
+            flows_csv_file.flush()
+
+
+def _append_flow_row(record):
+    """Thread-safe append of a single flow row to the active CSV file."""
+    _ensure_flows_csv()
+
+    with flows_csv_lock:
+        if flows_csv_writer is None or flows_csv_file is None:
+            return
+        flows_csv_writer.writerow(record)
+        flows_csv_file.flush()
+
+
+def _read_flows_csv_locked(csv_path: str) -> pd.DataFrame:
+    """Thread-safe CSV read to avoid race conditions with writers.
+    """
+    
+    with flows_csv_lock:
+        return pd.read_csv(csv_path, engine='python', on_bad_lines='skip')
 
 
 # NetFlow feature columns based on your training data
@@ -224,12 +278,6 @@ cols = ['FlowID'] + netflow_features + [
 
 flow_count = 0
 flow_df = pd.DataFrame(columns=cols)
-MAX_FLOW_HISTORY = 1000  # Keep only recent flows to limit memory
-MAX_ACTIVE_FLOWS = 100  # Limit concurrent flows
-FlowTimeout = 600
-
-src_ip_dict = {}
-current_flows = {}
 
 # Categorical columns that need encoding
 categorical_cols = ['TCP_FLAGS', 'L7_PROTO', 'PROTOCOL', 'CLIENT_TCP_FLAGS',
@@ -269,12 +317,6 @@ except Exception as e:
     print(f"Error loading models: {e}")
     traceback.print_exc()
     models_loaded = False
-
-# Store flows for batch processing
-flow_buffer = []
-flow_objects_buffer = []  # Store Flow objects to access nDPI data
-BATCH_SIZE = 5  # Process flows in batches to create graphs
-
 
 def extract_flow_features(flow_data):
     """Extract NetFlow features from Flow object data"""
@@ -516,9 +558,7 @@ def classify(flow_data, flow_obj=None):
                 flow_df.loc[len(flow_df)] = record
 
                 # Persist to CSV (if enabled)
-                if flows_csv_writer is not None:
-                    flows_csv_writer.writerow(record)
-                    flows_csv_file.flush()
+                _append_flow_row(record)
                 
                 # Memory optimization: Keep only recent flows
                 if len(flow_df) > MAX_FLOW_HISTORY:
@@ -576,9 +616,7 @@ def classify(flow_data, flow_obj=None):
                 flow_df.loc[len(flow_df)] = record
 
                 # Persist placeholder to CSV (if enabled)
-                if flows_csv_writer is not None:
-                    flows_csv_writer.writerow(record)
-                    flows_csv_file.flush()
+                _append_flow_row(record)
 
                 ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
@@ -609,44 +647,85 @@ def classify(flow_data, flow_obj=None):
 
 
 # ---- Pagination and history helpers ----
-def get_flows_dataframe():
-    """Return DataFrame of all flows, preferring persisted CSV if available."""
+def get_flows_dataframe() -> pd.DataFrame:
+    """Return DataFrame of all flows.
+    Returns:
+        pd.DataFrame: Flow data
+    """
     try:
-        # If CSV writer is active, use in-memory DataFrame (has latest rows)
+        # Use in-memory DataFrame (has latest rows)
         if flows_csv_writer is not None:
             return flow_df.copy()
         # Fall back to reading default CSV on disk if present
         import os
-        default_path = os.path.join(os.getcwd(), 'flows.csv')
+        default_path = os.path.join(os.getcwd(), flows_csv_file.name)
         if os.path.exists(default_path):
-            return pd.read_csv(default_path)
+            return _read_flows_csv_locked(default_path)
     except Exception:
         pass
     # Default to current in-memory DataFrame
     return flow_df.copy()
 
+
+def update_flow_in_csv(flow_id, record):
+    """Update or create a flow record in the CSV file"""
+    global flows_csv_file, flows_csv_writer
+    
+    try:
+        _ensure_flows_csv()
+        if flows_csv_file is None:
+            return
+
+        csv_path = flows_csv_file.name
+        with flows_csv_lock:
+            # Read existing CSV under the lock
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path, engine='python', on_bad_lines='skip')
+            else:
+                df = pd.DataFrame(columns=cols)
+
+            # Find and update or append the row
+            if flow_id in df['FlowID'].values:
+                idx = df[df['FlowID'] == flow_id].index[0]
+                for i, col in enumerate(cols):
+                    if i < len(record):
+                        df.at[idx, col] = record[i]
+            else:
+                new_row = {cols[i]: record[i] if i < len(record) else None for i in range(len(cols))}
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            # Write back to CSV and flush to disk while holding the lock
+            df.to_csv(
+                csv_path,
+                index=False,
+                quoting=csv.QUOTE_ALL,
+                lineterminator='\n'
+            )
+            flows_csv_file.flush()
+            print(f"[CSV] Updated flow {flow_id} in {csv_path}")
+        
+    except Exception as e:
+        print(f"[CSV] Error updating flow {flow_id}: {e}")
+        traceback.print_exc()
+
 @app.route('/api/flows')
 def api_flows():
-    """Server-side pagination for flows. Returns JSON.
-    Query params: page (1-based), page_size (default 1000)
+    """Return the latest flows, capped to the requested page_size (no paging).
+    Query params:
+        page_size: Number of latest flows to return (default MAX_FLOW_HISTORY)
     """
     try:
-        page = int(request.args.get('page', 1))
-        page_size = int(request.args.get('page_size', 1000))
+        page_size = int(request.args.get('page_size', MAX_FLOW_HISTORY))
     except Exception:
-        page, page_size = 1, 1000
+        page_size = MAX_FLOW_HISTORY
 
     df = get_flows_dataframe()
     if 'FlowID' in df.columns:
         df = df.sort_values(by='FlowID')
 
     total = len(df)
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = max(1, min(page, total_pages))
-
-    start = (page - 1) * page_size
-    end = start + page_size
-    page_df = df.iloc[start:end]
+    # Keep only the most recent page_size flows
+    page_df = df.tail(page_size) if page_size > 0 else df.tail(MAX_FLOW_HISTORY)
 
     # Build display arrays to match frontend table schema
     data = []
@@ -672,11 +751,11 @@ def api_flows():
         data.append(display)
 
     return jsonify({
-        'page': page,
+        'page': 1,
         'page_size': page_size,
         'total': total,
-        'total_pages': total_pages,
-        'is_last_page': page >= total_pages,
+        'total_pages': 1,
+        'is_last_page': True,
         'data': data
     })
 
@@ -685,10 +764,103 @@ def newPacket(packet: Packet):
     try:
         # Memory protection: limit active flows
         if len(current_flows) >= MAX_ACTIVE_FLOWS:
-            # Force cleanup of oldest flows
+            # Force cleanup of oldest flows - process immediately
             oldest_key = min(current_flows.keys(), key=lambda k: current_flows[k].latest_timestamp)
             flow_data = current_flows[oldest_key].get_data()
-            classify(flow_data, current_flows[oldest_key])
+            flow_obj = current_flows[oldest_key]
+            
+            # Add to buffer
+            classify(flow_data, flow_obj)
+            
+            # Force immediate processing of buffer to ensure cleanup flow is evaluated
+            global flow_buffer, flow_objects_buffer, flow_df, flow_count
+            if len(flow_buffer) > 0:
+                print(f"[FORCE_CLEANUP] Processing {len(flow_buffer)} buffered flow(s) before deletion...")
+                results = process_flow_batch(flow_buffer)
+                
+                if results and len(results) > 0:
+                    # Process and emit results immediately
+                    num_flows = min(len(results), len(flow_buffer))
+                    for idx in range(num_flows):
+                        current_flow_id = int(flow_count - len(flow_buffer) + idx + 1)
+                        flow_features = flow_buffer[idx]
+                        flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
+                        result = results[idx]
+                        
+                        classification = result['classification']
+                        proba_score = result['probability']
+                        probability_str = result.get('probability_str', '')
+                        risk = result['risk']
+                        
+                        # Save to dataframe and CSV - update if exists, otherwise create
+                        label = 0 if classification == 'Benign' else 1
+                        
+                        # Create record for CSV
+                        record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
+                            flow_features['IPV4_SRC_ADDR'],
+                            flow_features['L4_SRC_PORT'],
+                            flow_features['IPV4_DST_ADDR'],
+                            flow_features['L4_DST_PORT'],
+                            classification,
+                            label,
+                            proba_score,
+                            risk,
+                            json.dumps(result.get('all_probabilities', {}))
+                        ]
+                        
+                        # Check if this flow ID already exists in the dataframe
+                        existing_flow = flow_df[flow_df['FlowID'] == current_flow_id]
+                        
+                        if len(existing_flow) > 0:
+                            # Update existing row
+                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Attack'] = classification
+                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Label'] = label
+                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Probability'] = proba_score
+                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Risk'] = risk
+                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'All_Probabilities'] = json.dumps(result.get('all_probabilities', {}))
+                            # Update features too
+                            for feat in netflow_features:
+                                flow_df.loc[flow_df['FlowID'] == current_flow_id, feat] = flow_features.get(feat, 0)
+                        else:
+                            # Create new row
+                            flow_df.loc[len(flow_df)] = record
+                        
+                        # Update CSV file
+                        update_flow_in_csv(current_flow_id, record)
+                        
+                        if len(flow_df) > MAX_FLOW_HISTORY:
+                            flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
+                        
+                        # Log
+                        output_log.writerow([f'Flow #{current_flow_id} (Force Cleanup)'])
+                        output_log.writerow(['Attack:'] + [classification] + [proba_score])
+                        output_log.writerow(['All Probabilities:'] + [probability_str])
+                        output_log.writerow(['--------------------------------------------------------------------------------------------------'])
+                        
+                        # Emit to web
+                        ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
+                        ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
+                        
+                        disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
+                        disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
+                        disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
+                        disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
+                        protocol = flow_features.get('PROTOCOL', 0)
+                        flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
+                        app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
+                        pid = 'N/A'
+                        
+                        display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
+                                        protocol, flow_duration, app_name, pid, classification, proba_score, risk]
+                        socketio.emit('newresult', {'result': display_data,
+                                      "ips": json.loads(ip_data_json),
+                                      "all_probs": result.get('all_probabilities', {}),
+                                      "prob_str": probability_str}, namespace='/test')
+                
+                # Clear buffer after processing
+                flow_buffer = []
+                flow_objects_buffer = []
+            
             del current_flows[oldest_key]
         
         # Get flow key
@@ -707,7 +879,7 @@ def newPacket(packet: Packet):
             flow = current_flows[fwd_key]
 
             # Check for timeout
-            if (packet.time - flow.latest_timestamp) > FlowTimeout:
+            if (packet.time - flow.latest_timestamp) > FLOW_TIMEOUT:
                 flow_data = flow.get_data()
                 classify(flow_data, flow)  # Pass Flow object
                 del current_flows[fwd_key]
@@ -731,7 +903,7 @@ def newPacket(packet: Packet):
             flow = current_flows[bwd_key]
 
             # Check for timeout
-            if (packet.time - flow.latest_timestamp) > FlowTimeout:
+            if (packet.time - flow.latest_timestamp) > FLOW_TIMEOUT:
                 flow_data = flow.get_data()
                 classify(flow_data, flow)  # Pass Flow object
                 del current_flows[bwd_key]
@@ -805,7 +977,7 @@ def garbage_collect_inactive_flows(scan_interval_seconds: int = 5):
             # Work on a snapshot to avoid dict size change during iteration
             for key, flow in list(current_flows.items()):
                 try:
-                    if (now - flow.latest_timestamp) > FlowTimeout:
+                    if (now - flow.latest_timestamp) > FLOW_TIMEOUT:
                         flow_data = flow.get_data()
                         classify(flow_data, flow)
                         stale_keys.append(key)
@@ -834,13 +1006,36 @@ def flow_detail():
     """Show detailed information about a specific flow"""
     flow_id = request.args.get('flow_id', default=-1, type=int)
 
-    if flow_id == -1 or flow_id not in flow_df['FlowID'].values:
+    if flow_id == -1:
         return "Flow not found", 404
 
-    flow = flow_df.loc[flow_df['FlowID'] == flow_id]
+    # Read from flows.csv file
+    try:
+        # Try CSV first
+        if flows_csv_file is not None and hasattr(flows_csv_file, 'name'):
+            flows_csv_path = flows_csv_file.name
+        else:
+            flows_csv_path = DEFAULT_CSV_FILENAME
 
-    if len(flow) == 0:
-        return "Flow not found", 404
+        flow = None
+        if os.path.exists(flows_csv_path):
+            df = _read_flows_csv_locked(flows_csv_path)
+            if 'FlowID' in df.columns and flow_id in df['FlowID'].values:
+                flow = df.loc[df['FlowID'] == flow_id]
+
+        # Fallback to in-memory dataframe if CSV miss
+        if flow is None or len(flow) == 0:
+            mem_df = flow_df.copy()
+            if 'FlowID' in mem_df.columns and flow_id in mem_df['FlowID'].values:
+                flow = mem_df.loc[mem_df['FlowID'] == flow_id]
+
+        if flow is None or len(flow) == 0:
+            print(f"[FLOW_DETAIL] Flow {flow_id} not found in {flows_csv_path}")
+            return "Flow not found", 404
+    except Exception as e:
+        print(f"[FLOW_DETAIL] Error reading flows.csv: {e}")
+        traceback.print_exc()
+        return "Error loading flow data", 500
 
     # Get flow attack classification and risk
     classification = flow['Attack'].values[0] if 'Attack' in flow.columns else 'Unknown'
@@ -958,6 +1153,24 @@ def handle_re_evaluation(data):
         flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Label'] = label
         flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Probability'] = proba_score
         flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Risk'] = risk
+        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'All_Probabilities'] = json.dumps(result.get('all_probabilities', {}))
+
+        # Create record for CSV update
+        flow_record = flow_df[flow_df['FlowID'] == int(flow_id)].iloc[0]
+        record = [int(flow_id)] + [flow_record.get(f, 0) for f in netflow_features] + [
+            flow_record.get('IPV4_SRC_ADDR', '0.0.0.0'),
+            flow_record.get('L4_SRC_PORT', 0),
+            flow_record.get('IPV4_DST_ADDR', '0.0.0.0'),
+            flow_record.get('L4_DST_PORT', 0),
+            classification,
+            label,
+            proba_score,
+            risk,
+            json.dumps(result.get('all_probabilities', {}))
+        ]
+        
+        # Update CSV file with the new result
+        update_flow_in_csv(int(flow_id), record)
 
         # Log the re-evaluation
         output_log.writerow([f'Re-evaluated Flow #{flow_id}'])
@@ -992,26 +1205,37 @@ def set_filter(bpf_filter=""):
     filter = bpf_filter
     print(f"Capture filter set to: {bpf_filter}")
 
-def set_output_file(file_path=None):
+def set_output_file(file_path=DEFAULT_CSV_FILENAME):
     """Set output CSV file path (optional)"""
     global flows_csv_file, flows_csv_writer
     
-    # Close existing file if open
-    if flows_csv_file is not None:
-        try:
-            flows_csv_file.close()
-        except Exception:
-            pass
-    
-    # Only open and write header if file_path is provided
-    if file_path is not None:
-        flows_csv_file = open(file_path, 'w', newline='')
-        flows_csv_writer = csv.writer(flows_csv_file)
-        # Write header
-        flows_csv_writer.writerow(cols)
-    else:
-        flows_csv_file = None
-        flows_csv_writer = None
+    with flows_csv_lock:
+        # Close existing file if open
+        if flows_csv_file is not None:
+            try:
+                flows_csv_file.close()
+            except Exception:
+                pass
+
+        # Only open and write header if file_path is provided
+        if file_path is not None:
+            # Create parent directories if needed
+            os.makedirs(os.path.dirname(file_path) or "./", exist_ok=True)
+
+            flows_csv_file = open(file_path, 'w', newline='')
+            flows_csv_writer = csv.writer(
+                flows_csv_file,
+                quoting=csv.QUOTE_ALL,
+                lineterminator='\n'
+            )
+            flows_csv_writer.writerow(cols)
+            flows_csv_file.flush()
+        else:
+            flows_csv_file = None
+            flows_csv_writer = None
+
+# Open default flows CSV at startup (append-safe)
+_ensure_flows_csv()
 
 
 if __name__ == '__main__':
