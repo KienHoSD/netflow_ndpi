@@ -1,4 +1,7 @@
 $(document).ready(function(){
+    // Load available models on page load
+    loadAvailableModels();
+    
     // connect to the socket server (support http/https)
     var socket = io(window.location.protocol + '//' + document.domain + ':' + location.port + '/test');
     socket.on('connect', function(){
@@ -13,6 +16,80 @@ $(document).ready(function(){
     var chartUpdateQueued = false;
     var chartQueuedData = null;
     var logContainer = $('#log');
+
+    // ======= Model Management Functions =======
+    function loadAvailableModels() {
+        $.getJSON('/api/models', function(resp) {
+            if (resp.success) {
+                var dgiSelect = $('#dgi-model-select');
+                var multiclassSelect = $('#multiclass-model-select');
+                
+                // Populate DGI models
+                dgiSelect.empty();
+                resp.available_models.dgi_models.forEach(function(model) {
+                    dgiSelect.append('<option value="' + model + '">' + model + '</option>');
+                });
+                
+                // Populate Multiclass models
+                multiclassSelect.empty();
+                resp.available_models.multiclass_models.forEach(function(model) {
+                    multiclassSelect.append('<option value="' + model + '">' + model + '</option>');
+                });
+                
+                // Set current selections
+                dgiSelect.val(resp.current_models.dgi_model);
+                multiclassSelect.val(resp.current_models.multiclass_model);
+                
+                // Update display
+                updateCurrentModelsDisplay(resp.current_models);
+            }
+        }).fail(function() {
+            console.log('Failed to load available models');
+        });
+    }
+    
+    function updateCurrentModelsDisplay(currentModels) {
+        $('#current-dgi-model').text(currentModels.dgi_model);
+        $('#current-multiclass-model').text(currentModels.multiclass_model);
+    }
+    
+    $('#load-models-btn').on('click', function() {
+        var dgiModel = $('#dgi-model-select').val();
+        var multiclassModel = $('#multiclass-model-select').val();
+        
+        if (!dgiModel || !multiclassModel) {
+            alert('Please select both models');
+            return;
+        }
+        
+        $(this).prop('disabled', true).text('Loading...');
+        
+        $.ajax({
+            url: '/api/load-model',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                dgi_model: dgiModel,
+                multiclass_model: multiclassModel
+            }),
+            success: function(resp) {
+                if (resp.success) {
+                    updateCurrentModelsDisplay(resp.current_models);
+                    alert('Models loaded successfully!');
+                } else {
+                    alert('Error loading models: ' + resp.message);
+                }
+            },
+            error: function() {
+                alert('Failed to load models');
+            },
+            complete: function() {
+                $('#load-models-btn').prop('disabled', false).text('Load Models');
+            }
+        });
+    });
+    // ======= End Model Management Functions =======
+
     var myChart = new Chart(ctx, {
         type: 'bar',
         data: {

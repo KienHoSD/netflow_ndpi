@@ -287,36 +287,74 @@ categorical_cols = ['TCP_FLAGS', 'L7_PROTO', 'PROTOCOL', 'CLIENT_TCP_FLAGS',
 # Columns to normalize (all except categorical)
 cols_to_norm = [col for col in netflow_features if col not in categorical_cols]
 
-# Load models
+# Device selection (Use CPU for simplicity)
+device = 'cpu'
+print(f"Using device: {device}")
+
+# Model management
+current_dgi_model_name = 'best_dgi_CSE_multiclass_v3.pkl'
+current_multiclass_model_name = 'best_catboost_classifier_CSE_v3_fused.cbm'
+model_lock = Lock()  # Thread-safe model loading
+
+def get_available_models():
+    """Get list of available models in the models folder"""
+    models_dir = os.path.join(MODULE_DIR, 'models')
+    if not os.path.exists(models_dir):
+        return {'dgi_models': [], 'multiclass_models': []}
+    
+    dgi_models = sorted([f for f in os.listdir(models_dir) if f.startswith('best_dgi') and f.endswith('.pkl')])
+    multiclass_models = sorted([f for f in os.listdir(models_dir) if f.startswith('best_catboost') and f.endswith('.cbm')])
+    
+    return {'dgi_models': dgi_models, 'multiclass_models': multiclass_models}
+
+def load_models(dgi_model_name=None, multiclass_model_name=None):
+    """Load specified models"""
+    global dgi_model, catboost_model, encoder, scaler, models_loaded
+    global current_dgi_model_name, current_multiclass_model_name
+    
+    with model_lock:
+        try:
+            # Load DGI model
+            if dgi_model_name is None:
+                dgi_model_name = current_dgi_model_name
+            
+            dgi_path = os.path.join(MODULE_DIR, 'models', dgi_model_name)
+            if os.path.exists(dgi_path):
+                ndim_in = 39
+                edim = len(netflow_features)
+                dgi_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
+                dgi_model.load_state_dict(torch.load(dgi_path, map_location=device))
+                dgi_model.to(device)
+                dgi_model.eval()
+                current_dgi_model_name = dgi_model_name
+                print(f"Loaded DGI model: {dgi_model_name}")
+            
+            # Load Multiclass classifier
+            if multiclass_model_name is None:
+                multiclass_model_name = current_multiclass_model_name
+            
+            multiclass_path = os.path.join(MODULE_DIR, 'models', multiclass_model_name)
+            if os.path.exists(multiclass_path):
+                catboost_model = CatBoostClassifier()
+                catboost_model.load_model(multiclass_path)
+                current_multiclass_model_name = multiclass_model_name
+                print(f"Loaded Multiclass model: {multiclass_model_name}")
+            
+            # Initialize encoder and scaler
+            encoder = ce.TargetEncoder(cols=categorical_cols)
+            scaler = Normalizer()
+            models_loaded = True
+            return True, "Models loaded successfully"
+        
+        except Exception as e:
+            print(f"Error loading models: {e}")
+            traceback.print_exc()
+            models_loaded = False
+            return False, str(e)
+
+# Load models on startup
 print("Loading models...")
-try:
-    # Select device (Use CPU for simplicity)
-    device = 'cpu'
-    print(f"Using device: {device}")
-
-    # Load DGI model
-    ndim_in = 39  # number of features after encoding (without IPs, Ports)
-    edim = len(netflow_features)
-    dgi_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
-    dgi_model_path = os.path.join(MODULE_DIR, 'models', 'best_dgi_CSE_merged_traffic.pkl')
-    dgi_model.load_state_dict(torch.load(dgi_model_path, map_location=device))
-    dgi_model.to(device)
-    dgi_model.eval()
-
-    # Load CatBoost classifier
-    catboost_model = CatBoostClassifier()
-    catboost_model_path = os.path.join(MODULE_DIR, 'models', 'best_catboost_classifier_fused.cbm')
-    catboost_model.load_model(catboost_model_path)
-
-    # Initialize encoder and scaler (will be fitted on first batch)
-    encoder = ce.TargetEncoder(cols=categorical_cols)
-    scaler = Normalizer()
-    models_loaded = True
-
-except Exception as e:
-    print(f"Error loading models: {e}")
-    traceback.print_exc()
-    models_loaded = False
+load_models()
 
 def extract_flow_features(flow_data):
     """Extract NetFlow features from Flow object data"""
@@ -719,6 +757,42 @@ def update_flow_in_csv(flow_id, record):
     except Exception as e:
         print(f"[CSV] Error updating flow {flow_id}: {e}")
         traceback.print_exc()
+
+@app.route('/api/models')
+def api_models():
+    """Return list of available models and current selection"""
+    try:
+        available = get_available_models()
+        return jsonify({
+            'success': True,
+            'available_models': available,
+            'current_models': {
+                'dgi_model': current_dgi_model_name,
+                'multiclass_model': current_multiclass_model_name
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/load-model', methods=['POST'])
+def api_load_model():
+    """Load selected models"""
+    try:
+        data = request.get_json()
+        dgi_name = data.get('dgi_model')
+        multiclass_name = data.get('multiclass_model')
+        
+        success, message = load_models(dgi_name, multiclass_name)
+        return jsonify({
+            'success': success,
+            'message': message,
+            'current_models': {
+                'dgi_model': current_dgi_model_name,
+                'multiclass_model': current_multiclass_model_name
+            }
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/flows')
 def api_flows():
