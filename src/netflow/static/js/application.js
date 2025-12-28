@@ -245,12 +245,12 @@ $(document).ready(function(){
         }
     }
     function rebuildTableFromArray(arr) {
-        var messages_string = '<tr><th>Flow ID</th><th>Src IP</th><th>Src Port</th><th>Dst IP</th><th>Dst Port</th><th>Protocol</th><th>Flow Duration (ms)</th><th>App name</th><th>Anomaly</th><th>Prediction</th><th>Prob</th><th>Risk</th><th>Actions</th></tr>';
+        var messages_string = '<tr><th>Flow ID</th><th>Src IP</th><th>Src Port</th><th>Dst IP</th><th>Dst Port</th><th>Protocol</th><th>Start</th><th>End</th><th>Flow Duration (ms)</th><th>App name</th><th>Anomaly</th><th>Prediction</th><th>Prob</th><th>Risk</th><th>Actions</th></tr>';
         for (var i = 0; i < arr.length; i++) {
             messages_string += '<tr>';
             for (var j = 0; j < arr[i].length; j++) {
-                // Replace PID column (index 8) with anomaly prediction if available
-                if (j === 8 && anomalyFlowsLoaded) {
+                // Replace PID column (index 10) with anomaly prediction if available
+                if (j === 10 && anomalyFlowsLoaded) {
                     var flowId = arr[i][0];
                     var anomalyPred = anomalyPredictions[flowId];
                     if (anomalyPred !== undefined) {
@@ -432,11 +432,11 @@ $(document).ready(function(){
             if (messages_received[i][0] == msg.flow_id) {
                 // Update anomaly (index 8), classification (index 9), probability (index 10), and risk (index 11)
                 if (msg.anomaly_pred !== undefined) {
-                    messages_received[i][8] = msg.anomaly_pred;
+                    messages_received[i][10] = msg.anomaly_pred;
                 }
-                messages_received[i][9] = msg.classification;
-                messages_received[i][10] = msg.probability;
-                messages_received[i][11] = msg.risk;
+                messages_received[i][11] = msg.classification;
+                messages_received[i][12] = msg.probability;
+                messages_received[i][13] = msg.risk;
                 break;
             }
         }

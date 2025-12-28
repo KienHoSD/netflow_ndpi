@@ -87,6 +87,24 @@ def get_app_name_from_flow(flow_obj):
         print(f"Error getting app name: {e}")
         return "Unknown"
 
+
+def format_timestamp_to_time(timestamp):
+    """Format a timestamp to time string (HH:MM:SS)
+    
+    Args:
+        timestamp: Unix timestamp (float)
+        
+    Returns:
+        str: Time string in format HH:MM:SS
+    """
+    try:
+        if timestamp:
+            return time.strftime('%H:%M:%S', time.localtime(timestamp))
+        return "N/A"
+    except Exception as e:
+        print(f"Error formatting timestamp: {e}")
+        return "N/A"
+
 # ========== Graph Neural Network Models ==========
 class SAGELayer(nn.Module):
     def __init__(self, ndim_in, edims, ndim_out, activation):
@@ -755,12 +773,15 @@ def classify(flow_data, flow_obj=None):
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
 
                 # Format display data to match table columns:
-                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow duration, App name, Anomaly, Prediction, Prob, Risk
+                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Start, End, Flow duration, App name, Anomaly, Prediction, Prob, Risk
                 disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
                 disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
                 disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
                 disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
                 protocol = flow_features.get('PROTOCOL', 0)
+                # Get start and end times from Flow object
+                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
+                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
                 flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                 # Get app name from nDPI using Flow object
                 app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
@@ -772,7 +793,7 @@ def classify(flow_data, flow_obj=None):
                     anomaly_pred = 'N/A'
 
                 display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                                protocol, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
+                                protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display_data,
                               "ips": json.loads(ip_data_json),
                               "all_probs": result.get('all_probabilities', {}),
@@ -809,12 +830,15 @@ def classify(flow_data, flow_obj=None):
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
 
                 # Format display data to match table columns:
-                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow duration, App name, Anomaly, Prediction, Prob, Risk
+                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Start, End, Flow duration, App name, Anomaly, Prediction, Prob, Risk
                 disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
                 disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
                 disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
                 disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
                 protocol = flow_features.get('PROTOCOL', 0)
+                # Get start and end times from Flow object
+                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
+                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
                 flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                 app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
                 # Predict anomaly for this flow
@@ -825,7 +849,7 @@ def classify(flow_data, flow_obj=None):
                     anomaly_pred = 'N/A'
 
                 display = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport, protocol,
-                           flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
+                           start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display,
                               "ips": json.loads(ip_data_json),
                               "all_probs": {},
@@ -1130,6 +1154,11 @@ def api_flows():
     for _, row in page_df.iterrows():
         flow_id = int(row.get('FlowID', 0))
         protocol = row.get('PROTOCOL', 0)
+        # Get start and end times from row if available (they should be in milliseconds)
+        start_ms = row.get('FLOW_START_MILLISECONDS', 0)
+        end_ms = row.get('FLOW_END_MILLISECONDS', 0)
+        start_time = format_timestamp_to_time(start_ms / 1000) if start_ms else "N/A"
+        end_time = format_timestamp_to_time(end_ms / 1000) if end_ms else "N/A"
         duration = row.get('FLOW_DURATION_MILLISECONDS', 0)
         app_name = 'Unknown'
         # Get anomaly prediction if available
@@ -1141,6 +1170,8 @@ def api_flows():
             str(row.get('IPV4_DST_ADDR', '0.0.0.0')),
             str(row.get('L4_DST_PORT', '0')),
             protocol,
+            start_time,
+            end_time,
             str(duration),
             app_name,
             anomaly_pred,
@@ -1255,6 +1286,9 @@ def newPacket(packet: Packet):
                         disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
                         disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
                         protocol = flow_features.get('PROTOCOL', 0)
+                        # Get start and end times from Flow object
+                        start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
+                        end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
                         flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                         app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
                         # Predict anomaly for this flow
@@ -1265,7 +1299,7 @@ def newPacket(packet: Packet):
                             anomaly_pred = 'N/A'
                         
                         display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                                        protocol, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
+                                        protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                         socketio.emit('newresult', {'result': display_data,
                                       "ips": json.loads(ip_data_json),
                                       "all_probs": result.get('all_probabilities', {}),
