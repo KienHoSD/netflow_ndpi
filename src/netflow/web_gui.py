@@ -324,9 +324,9 @@ device = 'cpu'
 print(f"Using device: {device}")
 
 # Model management
-current_dgi_multiclass_model_name = 'best_dgi_CSE_multiclass_v2.pkl'
-current_multiclass_classify_model_name = 'best_catboost_classifier_CSE_v2_fused.cbm'
-current_dgi_anomaly_model_name = 'best_dgi_CSE_anomaly_v2.pkl'
+current_dgi_multiclass_model_name = 'best_dgi_CSE_multiclass_v3.pkl'
+current_multiclass_classify_model_name = 'best_catboost_classifier_CSE_v3_fused.cbm'
+current_dgi_anomaly_model_name = 'best_dgi_CSE_anomaly_v3.pkl'
 model_lock = Lock()  # Thread-safe model loading
 
 def get_available_models():
@@ -852,7 +852,7 @@ def classify(flow_data, flow_obj=None):
                            start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display,
                               "ips": json.loads(ip_data_json),
-                              "all_probs": {},
+                              "all_probs": {},  
                               "prob_str": "",
                               "flow_id": current_flow_id,
                               "anomaly_pred": anomaly_pred}, namespace='/test')
