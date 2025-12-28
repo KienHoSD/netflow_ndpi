@@ -11,37 +11,51 @@ $(document).ready(function(){
     var currentPage = 1;
     var maxPageSize = 1000;
     var pageSize = 100;
-    var liveMode = true; // live updates only when viewing latest page
+    // Restore liveMode from localStorage, default to true
+    var liveMode = localStorage.getItem('liveMode') !== null ? localStorage.getItem('liveMode') === 'true' : true;
     var ctx = document.getElementById("myChart");
     var chartUpdateQueued = false;
     var chartQueuedData = null;
     var logContainer = $('#log');
+    
+    // Load initial flows on page load
+    var initialLoadComplete = false;
 
     // ======= Model Management Functions =======
     function loadAvailableModels() {
         $.getJSON('/api/models', function(resp) {
             if (resp.success) {
-                var dgiSelect = $('#dgi-model-select');
+                var dgiMulticlassSelect = $('#dgi-multiclass-model-select');
                 var multiclassSelect = $('#multiclass-model-select');
-                
-                // Populate DGI models
-                dgiSelect.empty();
-                resp.available_models.dgi_models.forEach(function(model) {
-                    dgiSelect.append('<option value="' + model + '">' + model + '</option>');
+                var dgiAnomalySelect = $('#dgi-anomaly-model-select');
+
+                // Populate DGI Multiclass models
+                dgiMulticlassSelect.empty();
+                (resp.available_models.dgi_multiclass_models || []).forEach(function(model) {
+                    dgiMulticlassSelect.append('<option value="' + model + '">' + model + '</option>');
                 });
-                
-                // Populate Multiclass models
+
+                // Populate Multiclass (CatBoost) models
                 multiclassSelect.empty();
-                resp.available_models.multiclass_models.forEach(function(model) {
+                (resp.available_models.multiclass_models || []).forEach(function(model) {
                     multiclassSelect.append('<option value="' + model + '">' + model + '</option>');
                 });
-                
+
+                // Populate DGI Anomaly models
+                dgiAnomalySelect.empty();
+                (resp.available_models.dgi_anomaly_models || []).forEach(function(model) {
+                    dgiAnomalySelect.append('<option value="' + model + '">' + model + '</option>');
+                });
+
                 // Set current selections
-                dgiSelect.val(resp.current_models.dgi_model);
-                multiclassSelect.val(resp.current_models.multiclass_model);
-                
+                if (resp.current_models) {
+                    dgiMulticlassSelect.val(resp.current_models.dgi_multiclass_model);
+                    multiclassSelect.val(resp.current_models.multiclass_model);
+                    dgiAnomalySelect.val(resp.current_models.dgi_anomaly_model);
+                }
+
                 // Update display
-                updateCurrentModelsDisplay(resp.current_models);
+                updateCurrentModelsDisplay(resp.current_models || {});
             }
         }).fail(function() {
             console.log('Failed to load available models');
@@ -49,35 +63,38 @@ $(document).ready(function(){
     }
     
     function updateCurrentModelsDisplay(currentModels) {
-        $('#current-dgi-model').text(currentModels.dgi_model);
-        $('#current-multiclass-model').text(currentModels.multiclass_model);
+        $('#current-dgi-multiclass-model').text(currentModels.dgi_multiclass_model || '');
+        $('#current-multiclass-model').text(currentModels.multiclass_model || '');
+        $('#current-dgi-anomaly-model').text(currentModels.dgi_anomaly_model || '');
     }
     
     $('#load-models-btn').on('click', function() {
-        var dgiModel = $('#dgi-model-select').val();
+        var dgiMulticlassModel = $('#dgi-multiclass-model-select').val();
         var multiclassModel = $('#multiclass-model-select').val();
-        
-        if (!dgiModel || !multiclassModel) {
-            alert('Please select both models');
+        var dgiAnomalyModel = $('#dgi-anomaly-model-select').val();
+
+        if (!dgiMulticlassModel || !multiclassModel || !dgiAnomalyModel) {
+            alert('Please select all models');
             return;
         }
-        
+
         $(this).prop('disabled', true).text('Loading...');
-        
+
         $.ajax({
             url: '/api/load-model',
             type: 'POST',
             contentType: 'application/json',
             data: JSON.stringify({
-                dgi_model: dgiModel,
-                multiclass_model: multiclassModel
+                dgi_multiclass_model: dgiMulticlassModel,
+                multiclass_model: multiclassModel,
+                dgi_anomaly_model: dgiAnomalyModel
             }),
             success: function(resp) {
                 if (resp.success) {
                     updateCurrentModelsDisplay(resp.current_models);
                     alert('Models loaded successfully!');
                 } else {
-                    alert('Error loading models: ' + resp.message);
+                    alert('Error loading models: ' + (resp.message || resp.error || 'Unknown error'));
                 }
             },
             error: function() {
@@ -89,6 +106,68 @@ $(document).ready(function(){
         });
     });
     // ======= End Model Management Functions =======
+
+    // ======= Anomaly Detection Flows Management =======
+    var anomalyFlowsLoaded = false;
+    var anomalyPredictions = {}; // Store anomaly predictions by flow_id
+
+    $('#upload-anomaly-flows-btn').on('click', function() {
+        var fileInput = $('#anomaly-flows-file')[0];
+        if (!fileInput.files || fileInput.files.length === 0) {
+            alert('Please select a flows CSV file');
+            return;
+        }
+
+        var maxFlows = parseInt($('#max-flows-input').val()) || 100000;
+        var nEstimators = parseInt($('#n-estimators-input').val()) || 50;
+        var contamination = parseFloat($('#contamination-input').val()) || 0.01;
+
+        var formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        formData.append('max_flows', maxFlows);
+        formData.append('n_estimators', nEstimators);
+        formData.append('contamination', contamination);
+
+        $(this).prop('disabled', true).text('Processing...');
+        $('#anomaly-flows-status').text('Uploading and detecting anomalies...');
+
+        $.ajax({
+            url: '/api/upload-anomaly-flows',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            success: function(resp) {
+                if (resp.success) {
+                    anomalyFlowsLoaded = true;
+                    anomalyPredictions = {}; // Reset predictions
+                    $('#anomaly-flows-status').text('Loaded: ' + resp.filename + ' - Model trained on ' + resp.total_flows + ' flows. Predicting anomalies on new flows...');
+                    alert('Anomaly detection model loaded!\nTrained on ' + resp.total_flows + ' flows.\n' + (resp.message || 'Ready to detect anomalies on new flows.'));
+                    
+                    // Refresh the table to show anomaly column
+                    if (liveMode) {
+                        rebuildTableFromArray(messages_received);
+                    }
+                } else {
+                    alert('Error: ' + (resp.message || resp.error || 'Unknown error'));
+                    $('#anomaly-flows-status').text('Error loading file');
+                }
+            },
+            error: function(xhr) {
+                var errorMsg = 'Failed to upload and process file';
+                try {
+                    var resp = JSON.parse(xhr.responseText);
+                    errorMsg += ': ' + (resp.error || resp.message || '');
+                } catch(e) {}
+                alert(errorMsg);
+                $('#anomaly-flows-status').text('Error');
+            },
+            complete: function() {
+                $('#upload-anomaly-flows-btn').prop('disabled', false).text('Upload & Detect');
+            }
+        });
+    });
+    // ======= End Anomaly Detection Flows Management =======
 
     var myChart = new Chart(ctx, {
         type: 'bar',
@@ -166,11 +245,23 @@ $(document).ready(function(){
         }
     }
     function rebuildTableFromArray(arr) {
-        var messages_string = '<tr><th>Flow ID</th><th>Src IP</th><th>Src Port</th><th>Dst IP</th><th>Dst Port</th><th>Protocol</th><th>Flow Duration (ms)</th><th>App name</th><th>PID</th><th>Prediction</th><th>Prob</th><th>Risk</th><th>Actions</th></tr>';
+        var messages_string = '<tr><th>Flow ID</th><th>Src IP</th><th>Src Port</th><th>Dst IP</th><th>Dst Port</th><th>Protocol</th><th>Flow Duration (ms)</th><th>App name</th><th>Anomaly</th><th>Prediction</th><th>Prob</th><th>Risk</th><th>Actions</th></tr>';
         for (var i = 0; i < arr.length; i++) {
             messages_string += '<tr>';
             for (var j = 0; j < arr[i].length; j++) {
-                messages_string += '<td>' + arr[i][j].toString() + '</td>';
+                // Replace PID column (index 8) with anomaly prediction if available
+                if (j === 8 && anomalyFlowsLoaded) {
+                    var flowId = arr[i][0];
+                    var anomalyPred = anomalyPredictions[flowId];
+                    if (anomalyPred !== undefined) {
+                        var anomalyText = anomalyPred === 1 ? '<span style="color: red; font-weight: bold;">Anomaly</span>' : '<span style="color: green;">Normal</span>';
+                        messages_string += '<td>' + anomalyText + '</td>';
+                    } else {
+                        messages_string += '<td>N/A</td>';
+                    }
+                } else {
+                    messages_string += '<td>' + arr[i][j].toString() + '</td>';
+                }
             }
             messages_string += '<td> <a href="/flow-detail?flow_id=' + arr[i][0].toString() + '"><div>Detail</div></a></td>';
             messages_string += '<td><button class="btn btn-sm btn-primary re-evaluate-btn" data-flow-id="' + arr[i][0].toString() + '">Re-evaluate</button></td>' + '</tr>';
@@ -179,19 +270,56 @@ $(document).ready(function(){
     }
 
     function loadPage(page) {
-        liveMode = false;
+        liveMode = false;   
+        localStorage.setItem('liveMode', 'false');
         $.getJSON('/api/flows', { page_size: pageSize }, function(resp) {
             currentPage = 1; // API now returns latest flows only
             messages_received = resp.data || [];
+            // Load anomaly predictions from response
+            if (resp.anomaly_predictions) {
+                for (var flowId in resp.anomaly_predictions) {
+                    anomalyPredictions[parseInt(flowId)] = resp.anomaly_predictions[flowId];
+                }
+                // Mark that anomaly predictions are available
+                if (Object.keys(resp.anomaly_predictions).length > 0) {
+                    anomalyFlowsLoaded = true;
+                }
+            }
+            // Restore anomaly model status
+            if (resp.anomaly_model_status && resp.anomaly_model_status.loaded) {
+                anomalyFlowsLoaded = true;
+                $('#anomaly-flows-status').text('Loaded: ' + resp.anomaly_model_status.filename + 
+                    ' - Model trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
+            }
             rebuildTableFromArray(messages_received);
             // update controls text
             $('#pagination-page').text('Static');
+            initialLoadComplete = true;
         });
     }
+    
+    // Load initial data on page load based on liveMode state
+    setTimeout(function() {
+        if (!liveMode) {
+            // If in static mode, load the data
+            loadPage(1);
+        } else {
+            // If in live mode, just load anomaly model status
+            $.getJSON('/api/flows', { page_size: 0 }, function(resp) {
+                if (resp.anomaly_model_status && resp.anomaly_model_status.loaded) {
+                    anomalyFlowsLoaded = true;
+                    $('#anomaly-flows-status').text('Loaded: ' + resp.anomaly_model_status.filename + 
+                        ' - Model trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
+                }
+            });
+            $('#pagination-page').text('Live');
+        }
+        initialLoadComplete = true;
+    }, 500);
 
     // Add simple pagination controls
     var controlsHtml = '<div id="pagination-controls" style="margin: 8px 0;">' +
-        '<span id="pagination-page">Live</span> ' +
+        '<span id="pagination-page">...</span> ' +
         '<button id="refresh-page" class="btn btn-sm btn-default">Refresh</button> ' +
         '<button id="live-page" class="btn btn-sm btn-primary">Live</button>' +
         '<span style="margin-left: 20px;">Page Size (Max:1000):</span> ' +
@@ -223,6 +351,7 @@ $(document).ready(function(){
     });
     $('#live-page').on('click', function() {
         liveMode = true;
+        localStorage.setItem('liveMode', 'true');
         currentPage = 1; // treat live as latest
         rebuildTableFromArray(messages_received);
         $('#pagination-page').text('Live');
@@ -265,6 +394,11 @@ $(document).ready(function(){
         }
         // live mode: append and rebuild (unlimited - no size restriction)
         messages_received.push(msg.result);
+        
+        // Store anomaly prediction if provided
+        if (msg.anomaly_pred !== undefined && msg.flow_id !== undefined) {
+            anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
+        }
 
         // Trim messages if exceeding maxPageSize (1000)
         if (messages_received.length > maxPageSize) {
@@ -288,10 +422,18 @@ $(document).ready(function(){
     socket.on('re_evaluation_result', function(msg) {
         // console.log("Received re-evaluation result for flow " + msg.flow_id);
         
+        // Store anomaly prediction if provided
+        if (msg.anomaly_pred !== undefined) {
+            anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
+        }
+        
         // Find and update the flow in messages_received
         for (var i = 0; i < messages_received.length; i++) {
             if (messages_received[i][0] == msg.flow_id) {
-                // Update classification (index 9), probability (index 10), and risk (index 11)
+                // Update anomaly (index 8), classification (index 9), probability (index 10), and risk (index 11)
+                if (msg.anomaly_pred !== undefined) {
+                    messages_received[i][8] = msg.anomaly_pred;
+                }
                 messages_received[i][9] = msg.classification;
                 messages_received[i][10] = msg.probability;
                 messages_received[i][11] = msg.risk;

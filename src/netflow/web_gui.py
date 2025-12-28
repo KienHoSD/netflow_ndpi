@@ -29,7 +29,10 @@ import dgl.function as fn
 import networkx as nx
 import category_encoders as ce
 from sklearn.preprocessing import Normalizer
+from sklearn.ensemble import IsolationForest
 from catboost import CatBoostClassifier
+import itertools
+from werkzeug.utils import secure_filename
 
 import plotly
 import plotly.graph_objs
@@ -215,6 +218,17 @@ flow_buffer = []
 current_flows = {}
 src_ip_dict = {}
 
+# Anomaly detection flows
+dgi_anomaly_flows = None  # DataFrame for anomaly detection
+anomaly_predictions = {}  # Store anomaly predictions by flow_id
+anomaly_flows_file = None  # Current loaded anomaly flows filename
+anomaly_model = None  # Trained IsolationForest model
+anomaly_scaler = None  # Scaler for anomaly detection
+ANOMALY_FLOWS_DIR = os.path.join(MODULE_DIR, 'flows')
+anomaly_model_fitted = False  # Track if IsolationForest has been fitted
+anomaly_feature_order = []  # Features used during training for consistency
+anomaly_cols_to_norm_trained = []  # Columns normalized during training
+
 def _ensure_flows_csv(file_path=DEFAULT_CSV_FILENAME):
     """Lazily open the flows CSV with safe defaults and header if empty."""
     global flows_csv_file, flows_csv_writer
@@ -292,53 +306,75 @@ device = 'cpu'
 print(f"Using device: {device}")
 
 # Model management
-current_dgi_model_name = 'best_dgi_CSE_multiclass_v3.pkl'
-current_multiclass_model_name = 'best_catboost_classifier_CSE_v3_fused.cbm'
+current_dgi_multiclass_model_name = 'best_dgi_CSE_multiclass_v3.pkl'
+current_multiclass_classify_model_name = 'best_catboost_classifier_CSE_v3_fused.cbm'
+current_dgi_anomaly_model_name = 'best_dgi_CSE_anomaly_v3.pkl'
 model_lock = Lock()  # Thread-safe model loading
 
 def get_available_models():
     """Get list of available models in the models folder"""
     models_dir = os.path.join(MODULE_DIR, 'models')
     if not os.path.exists(models_dir):
-        return {'dgi_models': [], 'multiclass_models': []}
-    
-    dgi_models = sorted([f for f in os.listdir(models_dir) if f.startswith('best_dgi') and f.endswith('.pkl')])
-    multiclass_models = sorted([f for f in os.listdir(models_dir) if f.startswith('best_catboost') and f.endswith('.cbm')])
-    
-    return {'dgi_models': dgi_models, 'multiclass_models': multiclass_models}
+        return {'dgi_multiclass_models': [], 'dgi_anomaly_models': [], 'multiclass_models': []}
 
-def load_models(dgi_model_name=None, multiclass_model_name=None):
+    all_dgi = [f for f in os.listdir(models_dir) if f.startswith('best_dgi') and f.endswith('.pkl')]
+    dgi_multiclass_models = sorted([f for f in all_dgi if 'multiclass' in f])
+    dgi_anomaly_models = sorted([f for f in all_dgi if 'anomaly' in f])
+    multiclass_models = sorted([f for f in os.listdir(models_dir) if f.startswith('best_catboost') and f.endswith('.cbm')])
+
+    return {
+        'dgi_multiclass_models': dgi_multiclass_models,
+        'dgi_anomaly_models': dgi_anomaly_models,
+        'multiclass_models': multiclass_models
+    }
+
+def load_models(dgi_multiclass_model_name=None, multiclass_classify_model_name=None, dgi_anomaly_model_name=None):
     """Load specified models"""
-    global dgi_model, catboost_model, encoder, scaler, models_loaded
-    global current_dgi_model_name, current_multiclass_model_name
+    global dgi_multiclass_model, catboost_multiclass_model, dgi_anomaly_model, encoder, scaler, models_loaded
+    global current_dgi_multiclass_model_name, current_multiclass_classify_model_name, current_dgi_anomaly_model_name
     
     with model_lock:
         try:
             # Load DGI model
-            if dgi_model_name is None:
-                dgi_model_name = current_dgi_model_name
+            if dgi_multiclass_model_name is None:
+                dgi_multiclass_model_name = current_dgi_multiclass_model_name
             
-            dgi_path = os.path.join(MODULE_DIR, 'models', dgi_model_name)
-            if os.path.exists(dgi_path):
+            dgi_multiclass_path = os.path.join(MODULE_DIR, 'models', dgi_multiclass_model_name)
+            if os.path.exists(dgi_multiclass_path):
                 ndim_in = 39
                 edim = len(netflow_features)
-                dgi_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
-                dgi_model.load_state_dict(torch.load(dgi_path, map_location=device))
-                dgi_model.to(device)
-                dgi_model.eval()
-                current_dgi_model_name = dgi_model_name
-                print(f"Loaded DGI model: {dgi_model_name}")
+                dgi_multiclass_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
+                dgi_multiclass_model.load_state_dict(torch.load(dgi_multiclass_path, map_location=device))
+                dgi_multiclass_model.to(device)
+                dgi_multiclass_model.eval()
+                current_dgi_multiclass_model_name = dgi_multiclass_model_name
+                print(f"Loaded DGI multiclass model: {dgi_multiclass_model_name}")
             
             # Load Multiclass classifier
-            if multiclass_model_name is None:
-                multiclass_model_name = current_multiclass_model_name
+            if multiclass_classify_model_name is None:
+                multiclass_classify_model_name = current_multiclass_classify_model_name
             
-            multiclass_path = os.path.join(MODULE_DIR, 'models', multiclass_model_name)
-            if os.path.exists(multiclass_path):
-                catboost_model = CatBoostClassifier()
-                catboost_model.load_model(multiclass_path)
-                current_multiclass_model_name = multiclass_model_name
-                print(f"Loaded Multiclass model: {multiclass_model_name}")
+            multiclass_classify_path = os.path.join(MODULE_DIR, 'models', multiclass_classify_model_name)
+            if os.path.exists(multiclass_classify_path):
+                catboost_multiclass_model = CatBoostClassifier()
+                catboost_multiclass_model.load_model(multiclass_classify_path)
+                current_multiclass_classify_model_name = multiclass_classify_model_name
+                print(f"Loaded Multiclass classify model: {multiclass_classify_model_name}")
+
+            # Load DGI anomaly model (if needed)
+            if dgi_anomaly_model_name is None:
+                dgi_anomaly_model_name = current_dgi_anomaly_model_name
+            
+            dgi_anomaly_path = os.path.join(MODULE_DIR, 'models', dgi_anomaly_model_name)
+            if os.path.exists(dgi_anomaly_path):
+                ndim_in = 39
+                edim = len(netflow_features)
+                dgi_anomaly_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
+                dgi_anomaly_model.load_state_dict(torch.load(dgi_anomaly_path, map_location=device))
+                dgi_anomaly_model.to(device)
+                dgi_anomaly_model.eval()
+                current_dgi_anomaly_model_name = dgi_anomaly_model_name
+                print(f"Loaded DGI anomaly model: {dgi_anomaly_model_name}")
             
             # Initialize encoder and scaler
             encoder = ce.TargetEncoder(cols=categorical_cols)
@@ -369,6 +405,113 @@ def extract_flow_features(flow_data):
     features['L4_DST_PORT'] = str(flow_data.get('L4_DST_PORT', 0))
 
     return features
+
+
+def predict_anomaly(flow_features):
+    """Predict if a flow is anomalous using the trained IsolationForest model with DGI embeddings
+    
+    Args:
+        flow_features: Dictionary of flow features
+        
+    Returns:
+        int: 1 if anomaly, 0 if normal, None if model not loaded
+    """
+    global anomaly_model, anomaly_scaler, dgi_anomaly_model, anomaly_model_fitted, anomaly_feature_order, anomaly_cols_to_norm_trained
+    
+    if anomaly_model is None:
+        print("[Anomaly Detection] Model not loaded")
+        return None
+    
+    if not anomaly_model_fitted:
+        print("[Anomaly Detection] Model exists but is not fitted yet")
+        return None
+
+    if dgi_anomaly_model is None:
+        print("[Anomaly Detection] DGI anomaly model not loaded")
+        return None
+    
+    try:
+        # Create DataFrame from flow features (similar to process_flow_batch)
+        df = pd.DataFrame([flow_features])
+        
+        # Handle inf and nan
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.fillna(0, inplace=True)
+        
+        # Encode categorical features using the same feature order as training
+        feature_order = anomaly_feature_order if anomaly_feature_order else netflow_features
+        X = df[feature_order].copy()
+        for col in categorical_cols:
+            if col in X.columns:
+                X[col] = pd.Categorical(X[col].astype(str)).codes
+        
+        # Ensure all numeric
+        X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+        
+        # Normalize using the fitted scaler
+        if anomaly_scaler is not None:
+            cols_to_normalize = anomaly_cols_to_norm_trained if anomaly_cols_to_norm_trained else [col for col in cols_to_norm if col in X.columns]
+            if len(cols_to_normalize) > 0:
+                # Only normalize columns that exist in X
+                cols_to_normalize = [c for c in cols_to_normalize if c in X.columns]
+                if len(cols_to_normalize) > 0:
+                    X[cols_to_normalize] = anomaly_scaler.transform(X[cols_to_normalize])
+        
+        # Create feature vector for graph
+        X['h'] = X.values.tolist()
+        
+        # Build mini-graph from single flow
+        temp_df = pd.concat([X[['h']], df[['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']]], axis=1)
+        
+        g = nx.from_pandas_edgelist(
+            temp_df,
+            "IPV4_SRC_ADDR",
+            "IPV4_DST_ADDR",
+            ["h"],
+            create_using=nx.MultiGraph()
+        )
+        g = g.to_directed()
+        
+        # Convert to DGL
+        g_dgl = dgl.from_networkx(g, edge_attrs=['h'])
+        
+        # Initialize node features
+        nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(feature_order)], device=device)
+        g_dgl.ndata['h'] = torch.reshape(nfeat_weight, (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
+        
+        # Reshape edge features
+        g_dgl.edata['h'] = torch.reshape(g_dgl.edata['h'],
+                                         (g_dgl.edata['h'].shape[0], 1,
+                                          g_dgl.edata['h'].shape[1])).to(device)
+        
+        # Move to device
+        g_dgl = g_dgl.to(device)
+        
+        # Get embeddings from DGI anomaly model
+        with torch.no_grad():
+            embeddings = dgi_anomaly_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
+            embeddings = embeddings.detach().cpu().numpy()
+        
+        # Memory cleanup
+        del g_dgl, g, temp_df, nfeat_weight
+        
+        # Fusion: Combine embeddings with raw features
+        df_emb = pd.DataFrame(embeddings)
+        df_raw = X.copy().drop(columns=['h'])
+        df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
+        
+        # Predict with IsolationForest: -1 = anomaly, 1 = normal
+        prediction = anomaly_model.predict(df_fuse.to_numpy())[0]
+        
+        # Convert: -1 -> 1 (anomaly), 1 -> 0 (normal)
+        result = 1 if prediction == -1 else 0
+        print(f"[Anomaly Detection] Predicted: {result} (raw: {prediction})")
+        return result
+        
+    except Exception as e:
+        print(f"[Anomaly Detection] Prediction error: {e}")
+        traceback.print_exc()
+        return None
 
 
 def process_flow_batch(flows_data):
@@ -431,7 +574,7 @@ def process_flow_batch(flows_data):
 
         # Get embeddings from DGI
         with torch.no_grad():
-            embeddings = dgi_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
+            embeddings = dgi_multiclass_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
             embeddings = embeddings.detach().cpu().numpy()
         
         # Memory cleanup: delete graph objects after use
@@ -447,8 +590,8 @@ def process_flow_batch(flows_data):
         del df_emb, embeddings
 
         # Predict using CatBoost on fused features
-        predictions = catboost_model.predict(df_fuse)
-        probabilities = catboost_model.predict_proba(df_fuse)
+        predictions = catboost_multiclass_model.predict(df_fuse)
+        probabilities = catboost_multiclass_model.predict_proba(df_fuse)
 
         results = []
         for i, (pred, proba) in enumerate(zip(predictions, probabilities)):
@@ -612,7 +755,7 @@ def classify(flow_data, flow_obj=None):
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
 
                 # Format display data to match table columns:
-                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow start time, Flow last seen, App name, PID, Prediction, Prob, Risk
+                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow duration, App name, Anomaly, Prediction, Prob, Risk
                 disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
                 disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
                 disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
@@ -621,14 +764,21 @@ def classify(flow_data, flow_obj=None):
                 flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                 # Get app name from nDPI using Flow object
                 app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                pid = 'N/A'
+                # Predict anomaly for this flow
+                anomaly_pred = predict_anomaly(flow_features)
+                if anomaly_pred is not None:
+                    anomaly_predictions[current_flow_id] = anomaly_pred
+                else:
+                    anomaly_pred = 'N/A'
 
                 display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                                protocol, flow_duration, app_name, pid, classification, proba_score, risk]
+                                protocol, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display_data,
                               "ips": json.loads(ip_data_json),
                               "all_probs": result.get('all_probabilities', {}),
-                              "prob_str": probability_str}, namespace='/test')
+                              "prob_str": probability_str,
+                              "flow_id": current_flow_id,
+                              "anomaly_pred": anomaly_pred}, namespace='/test')
         else:
             # Fallback: emit placeholder rows so UI is not empty
             for idx, flow_features in enumerate(flow_buffer):
@@ -659,7 +809,7 @@ def classify(flow_data, flow_obj=None):
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
 
                 # Format display data to match table columns:
-                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow duration, App name, PID, Prediction, Prob, Risk
+                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Flow duration, App name, Anomaly, Prediction, Prob, Risk
                 disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
                 disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
                 disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
@@ -667,14 +817,21 @@ def classify(flow_data, flow_obj=None):
                 protocol = flow_features.get('PROTOCOL', 0)
                 flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                 app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                pid = 'N/A'
+                # Predict anomaly for this flow
+                anomaly_pred = predict_anomaly(flow_features)
+                if anomaly_pred is not None:
+                    anomaly_predictions[current_flow_id] = anomaly_pred
+                else:
+                    anomaly_pred = 'N/A'
 
                 display = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport, protocol,
-                           flow_duration, app_name, pid, classification, proba_score, risk]
+                           flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display,
                               "ips": json.loads(ip_data_json),
                               "all_probs": {},
-                              "prob_str": ""}, namespace='/test')
+                              "prob_str": "",
+                              "flow_id": current_flow_id,
+                              "anomaly_pred": anomaly_pred}, namespace='/test')
 
         # Clear buffers
         flow_buffer = []
@@ -767,8 +924,9 @@ def api_models():
             'success': True,
             'available_models': available,
             'current_models': {
-                'dgi_model': current_dgi_model_name,
-                'multiclass_model': current_multiclass_model_name
+                'dgi_multiclass_model': current_dgi_multiclass_model_name,
+                'multiclass_model': current_multiclass_classify_model_name,
+                'dgi_anomaly_model': current_dgi_anomaly_model_name
             }
         })
     except Exception as e:
@@ -779,19 +937,172 @@ def api_load_model():
     """Load selected models"""
     try:
         data = request.get_json()
-        dgi_name = data.get('dgi_model')
+        dgi_multiclass_name = data.get('dgi_multiclass_model')
         multiclass_name = data.get('multiclass_model')
-        
-        success, message = load_models(dgi_name, multiclass_name)
+        dgi_anomaly_name = data.get('dgi_anomaly_model')
+
+        success, message = load_models(dgi_multiclass_name, multiclass_name, dgi_anomaly_name)
         return jsonify({
             'success': success,
             'message': message,
             'current_models': {
-                'dgi_model': current_dgi_model_name,
-                'multiclass_model': current_multiclass_model_name
+                'dgi_multiclass_model': current_dgi_multiclass_model_name,
+                'multiclass_model': current_multiclass_classify_model_name,
+                'dgi_anomaly_model': current_dgi_anomaly_model_name
             }
         })
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/upload-anomaly-flows', methods=['POST'])
+def api_upload_anomaly_flows():
+    """Upload flows CSV file and train IsolationForest model for anomaly detection on new flows"""
+    global dgi_anomaly_flows, anomaly_predictions, anomaly_flows_file, anomaly_model, anomaly_scaler, dgi_anomaly_model
+    global anomaly_model_fitted, anomaly_feature_order, anomaly_cols_to_norm_trained
+    
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file provided'})
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': 'No file selected'})
+        
+        if not file.filename.endswith('.csv'):
+            return jsonify({'success': False, 'error': 'File must be a CSV'})
+        
+        # Get parameters
+        max_flows = int(request.form.get('max_flows', 100000))
+        n_estimators = int(request.form.get('n_estimators', 50))
+        contamination = float(request.form.get('contamination', 0.01))
+        
+        # Check if DGI anomaly model is loaded
+        if dgi_anomaly_model is None:
+            return jsonify({'success': False, 'error': 'DGI anomaly model not loaded. Please load models first.'})
+        
+        # Ensure flows directory exists
+        os.makedirs(ANOMALY_FLOWS_DIR, exist_ok=True)
+        
+        # Save file
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(ANOMALY_FLOWS_DIR, filename)
+        file.save(filepath)
+        
+        # Load and process flows
+        df = pd.read_csv(filepath, engine='python', on_bad_lines='skip')
+        
+        # Limit number of flows
+        if len(df) > max_flows:
+            df = df.head(max_flows)
+        
+        # Extract NetFlow features (ensure full feature set order)
+        available_features = [col for col in netflow_features if col in df.columns]
+        if len(available_features) == 0:
+            return jsonify({'success': False, 'error': 'No valid NetFlow feature columns found in CSV'})
+        
+        # Also need IP addresses for graph construction
+        if 'IPV4_SRC_ADDR' not in df.columns or 'IPV4_DST_ADDR' not in df.columns:
+            return jsonify({'success': False, 'error': 'IPV4_SRC_ADDR and IPV4_DST_ADDR columns required'})
+        
+        print(f"[Anomaly Detection] Processing {len(df)} flows...")
+        
+        # Process like process_flow_batch
+        # Build X with ALL netflow_features; fill missing columns with 0
+        X = pd.DataFrame({feat: (df[feat] if feat in df.columns else 0) for feat in netflow_features})
+        
+        # Handle inf and nan values
+        X.replace([np.inf, -np.inf], np.nan, inplace=True)
+        X.fillna(0, inplace=True)
+        
+        # Encode categorical features
+        for col in categorical_cols:
+            if col in X.columns:
+                X[col] = pd.Categorical(X[col].astype(str)).codes
+        
+        # Ensure all columns are numeric
+        X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+        
+        # Normalize numerical features
+        anomaly_scaler = Normalizer()
+        cols_to_normalize = [col for col in cols_to_norm if col in X.columns]
+        if len(cols_to_normalize) > 0:
+            X[cols_to_normalize] = anomaly_scaler.fit_transform(X[cols_to_normalize])
+        
+        # Create feature vector for each edge
+        X['h'] = X.values.tolist()
+        
+        # Build graph from flows
+        temp_df = pd.concat([X[['h']], df[['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']]], axis=1)
+        
+        g = nx.from_pandas_edgelist(
+            temp_df,
+            "IPV4_SRC_ADDR",
+            "IPV4_DST_ADDR",
+            ["h"],
+            create_using=nx.MultiGraph()
+        )
+        g = g.to_directed()
+        
+        # Convert to DGL
+        g_dgl = dgl.from_networkx(g, edge_attrs=['h'])
+        
+        # Initialize node features
+        nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(netflow_features)], device=device)
+        g_dgl.ndata['h'] = torch.reshape(nfeat_weight, (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
+        
+        # Reshape edge features
+        g_dgl.edata['h'] = torch.reshape(g_dgl.edata['h'],
+                                         (g_dgl.edata['h'].shape[0], 1,
+                                          g_dgl.edata['h'].shape[1])).to(device)
+        
+        # Move graph to device
+        g_dgl = g_dgl.to(device)
+        
+        # Get embeddings from DGI anomaly model
+        print(f"[Anomaly Detection] Generating embeddings using DGI anomaly model...")
+        with torch.no_grad():
+            embeddings = dgi_anomaly_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
+            embeddings = embeddings.detach().cpu().numpy()
+        
+        # Memory cleanup
+        del g_dgl, g, temp_df, nfeat_weight
+        
+        # Multimodal (Fusion) Learning: Combine embeddings with raw features
+        print(f"[Anomaly Detection] Fusing embeddings with raw features...")
+        df_emb = pd.DataFrame(embeddings)
+        df_raw = X.copy().drop(columns=['h'])
+        df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
+        
+        # Memory cleanup
+        del df_emb, embeddings, X
+        
+        # Train IsolationForest on fused features
+        print(f"[Anomaly Detection] Training IsolationForest with n_estimators={n_estimators}, contamination={contamination}")
+        anomaly_model = IsolationForest(n_estimators=n_estimators, contamination=contamination, random_state=42)
+        anomaly_model.fit(df_fuse.to_numpy())
+        
+        # Store DataFrame and metadata
+        dgi_anomaly_flows = df
+        anomaly_flows_file = filename
+        anomaly_predictions = {}  # Clear previous predictions
+        # Persist training metadata for consistent prediction preprocessing
+        anomaly_feature_order = netflow_features[:]
+        anomaly_cols_to_norm_trained = cols_to_normalize[:]
+        anomaly_model_fitted = True
+        
+        print(f"[Anomaly Detection] Model trained on {len(df)} flows with fusion features. Ready to predict anomalies on new flows.")
+        
+        return jsonify({
+            'success': True,
+            'filename': filename,
+            'total_flows': len(df),
+            'message': f'Model trained on {len(df)} flows with DGI+fusion. Ready to detect anomalies.',
+            'predictions': {}  # Empty since we'll predict on new flows
+        })
+        
+    except Exception as e:
+        print(f"[Anomaly Detection] Error: {e}")
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/flows')
@@ -815,13 +1126,16 @@ def api_flows():
 
     # Build display arrays to match frontend table schema
     data = []
+    predictions = {}  # Send anomaly predictions separately
     for _, row in page_df.iterrows():
+        flow_id = int(row.get('FlowID', 0))
         protocol = row.get('PROTOCOL', 0)
         duration = row.get('FLOW_DURATION_MILLISECONDS', 0)
         app_name = 'Unknown'
-        pid = 'N/A'
+        # Get anomaly prediction if available
+        anomaly_pred = anomaly_predictions.get(flow_id, 'N/A')
         display = [
-            int(row.get('FlowID', 0)),
+            flow_id,
             str(row.get('IPV4_SRC_ADDR', '0.0.0.0')),
             str(row.get('L4_SRC_PORT', '0')),
             str(row.get('IPV4_DST_ADDR', '0.0.0.0')),
@@ -829,12 +1143,14 @@ def api_flows():
             protocol,
             str(duration),
             app_name,
-            pid,
+            anomaly_pred,
             row.get('Attack', 'Pending'),
             row.get('Probability', 0.0),
             row.get('Risk', 'Processing')
         ]
         data.append(display)
+        if anomaly_pred != 'N/A':
+            predictions[flow_id] = anomaly_pred
 
     return jsonify({
         'page': 1,
@@ -842,7 +1158,13 @@ def api_flows():
         'total': total,
         'total_pages': 1,
         'is_last_page': True,
-        'data': data
+        'data': data,
+        'anomaly_predictions': predictions,
+        'anomaly_model_status': {
+            'loaded': anomaly_model_fitted,
+            'filename': anomaly_flows_file if anomaly_model_fitted else None,
+            'total_flows': len(dgi_anomaly_flows) if anomaly_model_fitted and dgi_anomaly_flows is not None else 0
+        }
     })
 
 def newPacket(packet: Packet):
@@ -935,14 +1257,21 @@ def newPacket(packet: Packet):
                         protocol = flow_features.get('PROTOCOL', 0)
                         flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                         app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                        pid = 'N/A'
+                        # Predict anomaly for this flow
+                        anomaly_pred = predict_anomaly(flow_features)
+                        if anomaly_pred is not None:
+                            anomaly_predictions[current_flow_id] = anomaly_pred
+                        else:
+                            anomaly_pred = 'N/A'
                         
                         display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                                        protocol, flow_duration, app_name, pid, classification, proba_score, risk]
+                                        protocol, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                         socketio.emit('newresult', {'result': display_data,
                                       "ips": json.loads(ip_data_json),
                                       "all_probs": result.get('all_probabilities', {}),
-                                      "prob_str": probability_str}, namespace='/test')
+                                      "prob_str": probability_str,
+                                      "flow_id": current_flow_id,
+                                      "anomaly_pred": anomaly_pred}, namespace='/test')
                 
                 # Clear buffer after processing
                 flow_buffer = []
@@ -1234,6 +1563,13 @@ def handle_re_evaluation(data):
         proba_score = result['probability']
         risk = result['risk']
 
+        # Predict anomaly for re-evaluated flow
+        anomaly_pred = predict_anomaly(features)
+        if anomaly_pred is not None:
+            anomaly_predictions[int(flow_id)] = anomaly_pred
+        else:
+            anomaly_pred = 'N/A'
+
         # Update the dataframe
         label = 0 if classification == 'Benign' else 1
         flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Attack'] = classification
@@ -1269,10 +1605,11 @@ def handle_re_evaluation(data):
             'flow_id': flow_id,
             'classification': classification,
             'probability': proba_score,
-            'risk': risk
+            'risk': risk,
+            'anomaly_pred': anomaly_pred
         }, namespace='/test')
 
-        print(f'Flow {flow_id} re-evaluated: {classification} ({proba_score:.4f})')
+        print(f'Flow {flow_id} re-evaluated: {classification} ({proba_score:.4f}), Anomaly: {anomaly_pred}')
     else:
         print(f'Failed to re-evaluate flow {flow_id}')
 
