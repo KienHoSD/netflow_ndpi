@@ -306,9 +306,9 @@ device = 'cpu'
 print(f"Using device: {device}")
 
 # Model management
-current_dgi_multiclass_model_name = 'best_dgi_CSE_multiclass_v3.pkl'
-current_multiclass_classify_model_name = 'best_catboost_classifier_CSE_v3_fused.cbm'
-current_dgi_anomaly_model_name = 'best_dgi_CSE_anomaly_v3.pkl'
+current_dgi_multiclass_model_name = 'best_dgi_CSE_multiclass_v2.pkl'
+current_multiclass_classify_model_name = 'best_catboost_classifier_CSE_v2_fused.cbm'
+current_dgi_anomaly_model_name = 'best_dgi_CSE_anomaly_v2.pkl'
 model_lock = Lock()  # Thread-safe model loading
 
 def get_available_models():
