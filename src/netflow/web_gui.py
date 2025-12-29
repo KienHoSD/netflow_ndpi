@@ -339,7 +339,7 @@ def get_available_models():
     all_dgi = [f for f in os.listdir(models_dir) if f.startswith('best_dgi') and f.endswith('.pkl')]
     dgi_multiclass_models = sorted([f for f in all_dgi if 'multiclass' in f])
     dgi_anomaly_models = sorted([f for f in all_dgi if 'anomaly' in f])
-    multiclass_models = sorted([f for f in os.listdir(models_dir) if f.startswith('best_catboost') and f.endswith('.cbm')])
+    multiclass_models = sorted([f for f in os.listdir(models_dir) if 'classifier' in f and (f.endswith('.cbm') or f.endswith('.json') or f.endswith('.pkl'))])
 
     return {
         'dgi_multiclass_models': dgi_multiclass_models,

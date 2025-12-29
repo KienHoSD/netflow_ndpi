@@ -2,6 +2,15 @@ $(document).ready(function(){
     // Load available models on page load
     loadAvailableModels();
     
+    // Handle help button toggle
+    $('#toggle-help-btn').on('click', function() {
+        $('#help-section').slideDown();
+    });
+    
+    $('#toggle-help-close-btn').on('click', function() {
+        $('#help-section').slideUp();
+    });
+    
     // connect to the socket server (support http/https)
     var socket = io(window.location.protocol + '//' + document.domain + ':' + location.port + '/test');
     socket.on('connect', function(){
@@ -443,6 +452,23 @@ $(document).ready(function(){
         
         // Rebuild the table
         rebuildTableFromArray(messages_received);
+    });
+
+    // Handle flow detail navigation
+    $('#go-to-flow-detail-btn').on('click', function() {
+        var flowId = $('#flow-detail-input').val();
+        if (!flowId || isNaN(flowId)) {
+            alert('Please enter a valid flow ID');
+            return;
+        }
+        window.location.href = '/flow-detail?flow_id=' + flowId;
+    });
+
+    // Allow Enter key to trigger flow detail navigation
+    $('#flow-detail-input').on('keypress', function(e) {
+        if (e.which === 13) {
+            $('#go-to-flow-detail-btn').click();
+        }
     });
 
 });

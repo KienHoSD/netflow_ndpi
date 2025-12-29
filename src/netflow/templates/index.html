@@ -24,6 +24,56 @@
   <div class="jumbotron">
     <h1>APT Detection System</h1>
     <p>By DK</p>
+    <button id="toggle-help-btn" class="btn btn-info">How to Use</button>
+  </div>
+  
+  <!-- Help/Instructions Section -->
+  <div id="help-section" style="display: none; background-color: #e8f4f8; border: 1px solid #b8daff; border-radius: 4px; padding: 20px; margin-bottom: 20px;">
+    <h3>How to Use This System</h3>
+    <p><strong>Step 0: Train/Build Your Own Model!</strong></p>
+    <ul>
+      <li>Visit the repository: <a href="https://github.com/KienHoSD/NIDS_Anomal-E_Multimodal" target="_blank">NIDS_Anomal-E_Multimodal</a></li>
+      <li>Base on the <strong>Anomal_E_fuse(multimodal)_*</strong> files to load your own dataset</li>
+      <li>Build your own models based on your dataset, the dataset should have Attack Labels similar to NF-CSE-CIC-IDS2018-v2</li>
+      <li>Scale the dataset to your preferable scale and quantity, then testing different algorithms (remember the best parameters after grid search that give the highest scores)</li>
+      <li>Save the trained models into the <strong>netflow_ndpi/src/netflow/models/</strong> folder</li>
+      <li>Make sure the models are named properly to be detected by this system (e.g., <strong>best_dgi_CSE_multiclass_*.pkl</strong>, <strong>best_catboost_classifier_*.cbm/pkl/json</strong>, <strong>best_dgi_CSE_anomaly_*.pkl</strong>)</li>
+      <li>For <strong>anomaly detection models</strong> (DGI model): Use all benign flows</li>
+      <li>For <strong>multiclass detection models</strong> (DGI model and CatBoost/XGBoost): Use balanced flows from labeled dataset</li>
+      <li>You can look at the <strong>Scores.ods</strong> file to understand why IsolationForest, CatBoost algorithms are chosen (Spoiler: they have the overall highest scores imo)</li>
+    </ul>
+    
+    <p><strong>Step 1: Load Models</strong></p>
+    <ul>
+      <li>Select the desired DGI Multiclass Model, Multiclass Classify Model, and DGI Anomaly Model from the dropdowns</li>
+      <li>Click "Load Models" to initialize them</li>
+      <li>Default models are pre-loaded for immediate use</li>
+    </ul>
+    
+    <p><strong>Step 2: Upload Anomaly Detection Flows (Optional)</strong></p>
+    <ul>
+      <li>Upload a CSV file containing flow data for anomaly detection (have at least 43 NetFlow V2 features) </li>
+      <li>Configure the anomaly detection parameters (Max Flows, N Estimators, Contamination)</li>
+      <li>Click "Upload & Detect" to train the IsolationForest model</li>
+    </ul>
+    
+    <p><strong>Step 3: Monitor Network Flows</strong></p>
+    <ul>
+      <li>Use the <strong>Live</strong> mode to see flows in real-time as they are captured</li>
+      <li>Use the <strong>Refresh</strong> button to reload the current view</li>
+      <li>Use the <strong>Show Range</strong> feature to filter flows by ID range</li>
+      <li>Use the <strong>Go to Flow Detail</strong> textbox to jump directly to a specific flow's detail page</li>
+    </ul>
+    
+    <p><strong>Step 4: Analyze Results</strong></p>
+    <ul>
+      <li>View flow predictions and probabilities in the table</li>
+      <li>Check the "Anomaly" column to see normal/anomalous classification</li>
+      <li>Click "Detail" to see full flow information</li>
+      <li>Click "Re-evaluate" to reclassify a flow with the current models</li>
+    </ul>
+    
+    <button id="toggle-help-close-btn" class="btn btn-default" style="margin-top: 10px;">Close</button>
   </div>
 </div>
     
@@ -98,9 +148,14 @@
     </div>
 
     <canvas width = 60 height = 20 id="myChart"></canvas>
-    <div class="row">
+    <div class="row" style="margin-bottom: 15px;">
         <p>Captured flow info here:</p>
         <h3>Captured flow:</h3>
+        <div style="margin-bottom: 10px;">
+            <label for="flow-detail-input">Go to Flow Detail:</label>
+            <input type="number" id="flow-detail-input" placeholder="Enter flow ID" style="width: 150px; padding: 5px; margin: 0 5px;">
+            <button id="go-to-flow-detail-btn" class="btn btn-sm btn-info">Open Detail</button>
+        </div>
         <div id="log" style="max-height: 500px; overflow-y: auto; overflow-x: auto; border: 1px solid #ddd;">
         <table width="100%" border="1" cellpadding="2" cellspacing="0" class="display compact" id="details">
         </table>
