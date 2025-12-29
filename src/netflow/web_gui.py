@@ -228,12 +228,13 @@ DEFAULT_CSV_FILENAME = "flows.csv"
 MAX_FLOW_HISTORY = 1000  # Keep only recent flows to limit memory
 MAX_ACTIVE_FLOWS = 100  # Limit concurrent flows (older flows get removed, can not be reclassified)
 FLOW_TIMEOUT = 300 # Flow timeout in seconds
-BATCH_SIZE = 10  # Process flows in batches to create graphs
+BATCH_SIZE = 1  # Process flows immediately (1 = no batching, real-time classification)
 
 # Store flows for batch processing
 flow_objects_buffer = []  # Store Flow objects to access nDPI data
 flow_buffer = []
 current_flows = {}
+current_flows_lock = Lock()  # Thread-safe access to current_flows
 src_ip_dict = {}
 
 # Anomaly detection flows
@@ -721,13 +722,12 @@ def classify(flow_data, flow_obj=None):
 
         if results and len(results) > 0:
             print(f"[DEBUG] Got {len(results)} results for {len(flow_buffer)} flows")
-            # Results might have more entries than flows due to directed graph edges
-            # Take only the first N results matching buffer size
-            num_flows = min(len(results), len(flow_buffer))
+            # Process only flows we have results for
+            num_flows_to_process = min(len(results), len(flow_buffer))
 
             # Emit model-based results
-            for idx in range(num_flows):
-                flow_count += 1  # Increment only when actually creating a flow
+            for idx in range(num_flows_to_process):
+                flow_count += 1  # Increment only when we have a valid result
                 current_flow_id = flow_count
                 flow_features = flow_buffer[idx]
                 flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
@@ -1202,11 +1202,21 @@ def newPacket(packet: Packet):
     """Process a new packet and update flows"""
     try:
         # Memory protection: limit active flows
-        if len(current_flows) >= MAX_ACTIVE_FLOWS:
+        with current_flows_lock:
+            flows_count = len(current_flows)
+        
+        if flows_count >= MAX_ACTIVE_FLOWS:
             # Force cleanup of oldest flows - process immediately
-            oldest_key = min(current_flows.keys(), key=lambda k: current_flows[k].latest_timestamp)
-            flow_data = current_flows[oldest_key].get_data()
-            flow_obj = current_flows[oldest_key]
+            with current_flows_lock:
+                if len(current_flows) > 0:
+                    oldest_key = min(current_flows.keys(), key=lambda k: current_flows[k].latest_timestamp)
+                    flow_data = current_flows[oldest_key].get_data()
+                    flow_obj = current_flows[oldest_key]
+                else:
+                    oldest_key = None
+            
+            if oldest_key is None:
+                return
             
             # Add to buffer
             classify(flow_data, flow_obj)
@@ -1311,7 +1321,8 @@ def newPacket(packet: Packet):
                 flow_buffer = []
                 flow_objects_buffer = []
             
-            del current_flows[oldest_key]
+            with current_flows_lock:
+                current_flows.pop(oldest_key, None)
         
         # Get flow key
         direction = PacketDirection.FORWARD
@@ -1324,58 +1335,47 @@ def newPacket(packet: Packet):
         fwd_key = f"{src_ip}:{src_port}-{dest_ip}:{dest_port}"
         bwd_key = f"{dest_ip}:{dest_port}-{src_ip}:{src_port}"
 
-        # Check if flow exists
-        if fwd_key in current_flows:
-            flow = current_flows[fwd_key]
+        # Check if flow exists (timeout handled by GC thread)
+        with current_flows_lock:
+            flow_exists_fwd = fwd_key in current_flows
+            flow_exists_bwd = bwd_key in current_flows
+        
+        if flow_exists_fwd:
+            with current_flows_lock:
+                flow = current_flows[fwd_key]
+            
+            # Add packet to existing flow
+            flow.add_packet(packet, PacketDirection.FORWARD)
 
-            # Check for timeout
-            if (packet.time - flow.latest_timestamp) > FLOW_TIMEOUT:
-                flow_data = flow.get_data()
-                classify(flow_data, flow)  # Pass Flow object
-                del current_flows[fwd_key]
+            # Check for flow termination (FIN or RST)
+            if packet.haslayer("TCP"):
+                tcp = packet["TCP"]
+                if tcp.flags & 0x01 or tcp.flags & 0x04:  # FIN or RST
+                    flow_data = flow.get_data()
+                    classify(flow_data, flow)  # Pass Flow object
+                    with current_flows_lock:
+                        current_flows.pop(fwd_key, None)
 
-                # Create new flow
-                flow = Flow(packet, PacketDirection.FORWARD, attack=None)
-                current_flows[fwd_key] = flow
-            else:
-                # Add packet to existing flow
-                flow.add_packet(packet, PacketDirection.FORWARD)
+        elif flow_exists_bwd:
+            with current_flows_lock:
+                flow = current_flows[bwd_key]
+            
+            # Add packet to existing flow (reverse direction)
+            flow.add_packet(packet, PacketDirection.REVERSE)
 
-                # Check for flow termination (FIN or RST)
-                if packet.haslayer("TCP"):
-                    tcp = packet["TCP"]
-                    if tcp.flags & 0x01 or tcp.flags & 0x04:  # FIN or RST
-                        flow_data = flow.get_data()
-                        classify(flow_data, flow)  # Pass Flow object
-                        del current_flows[fwd_key]
-
-        elif bwd_key in current_flows:
-            flow = current_flows[bwd_key]
-
-            # Check for timeout
-            if (packet.time - flow.latest_timestamp) > FLOW_TIMEOUT:
-                flow_data = flow.get_data()
-                classify(flow_data, flow)  # Pass Flow object
-                del current_flows[bwd_key]
-
-                # Create new flow
-                flow = Flow(packet, PacketDirection.FORWARD, attack=None)
-                current_flows[fwd_key] = flow
-            else:
-                # Add packet to existing flow (reverse direction)
-                flow.add_packet(packet, PacketDirection.REVERSE)
-
-                # Check for flow termination
-                if packet.haslayer("TCP"):
-                    tcp = packet["TCP"]
-                    if tcp.flags & 0x01 or tcp.flags & 0x04:  # FIN or RST
-                        flow_data = flow.get_data()
-                        classify(flow_data, flow)  # Pass Flow object
-                        del current_flows[bwd_key]
+            # Check for flow termination
+            if packet.haslayer("TCP"):
+                tcp = packet["TCP"]
+                if tcp.flags & 0x01 or tcp.flags & 0x04:  # FIN or RST
+                    flow_data = flow.get_data()
+                    classify(flow_data, flow)  # Pass Flow object
+                    with current_flows_lock:
+                        current_flows.pop(bwd_key, None)
         else:
             # Create new flow
             flow = Flow(packet, PacketDirection.FORWARD, attack=None)
-            current_flows[fwd_key] = flow
+            with current_flows_lock:
+                current_flows[fwd_key] = flow
 
     except AttributeError:
         # Not IP or TCP/UDP packet
@@ -1416,27 +1416,38 @@ def snif_and_detect():
 def garbage_collect_inactive_flows(scan_interval_seconds: int = 5):
     """Background task to remove inactive flows from memory.
 
-    A flow is considered inactive if now - latest_timestamp > FlowTimeout.
+    A flow is considered inactive if now - latest_timestamp > FLOW_TIMEOUT.
     Before removal, we classify the flow once to emit/save results.
+    This is the ONLY place where timeout-based flow cleanup happens.
     """
     global current_flows
     while not thread_stop_event.isSet():
         try:
             now = time.time()
-            stale_keys = []
-            # Work on a snapshot to avoid dict size change during iteration
-            for key, flow in list(current_flows.items()):
+            stale_flows = []
+            
+            # Get snapshot of flows to check
+            with current_flows_lock:
+                flows_snapshot = list(current_flows.items())
+            
+            # Check each flow for timeout (without holding lock)
+            for key, flow in flows_snapshot:
                 try:
                     if (now - flow.latest_timestamp) > FLOW_TIMEOUT:
                         flow_data = flow.get_data()
-                        classify(flow_data, flow)
-                        stale_keys.append(key)
+                        stale_flows.append((key, flow_data, flow))
                 except Exception as e:
                     print(f"[GC] Error processing flow {key}: {e}")
                     traceback.print_exc()
 
-            for key in stale_keys:
-                current_flows.pop(key, None)
+            # Classify and remove stale flows
+            for key, flow_data, flow_obj in stale_flows:
+                classify(flow_data, flow_obj)
+                with current_flows_lock:
+                    current_flows.pop(key, None)
+            
+            if len(stale_flows) > 0:
+                print(f"[GC] Cleaned up {len(stale_flows)} inactive flow(s)")
 
         except Exception as e:
             print(f"[GC] Collector error: {e}")
