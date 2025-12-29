@@ -212,6 +212,7 @@ thread_stop_event = Event()
 
 # Configuration for packet capture
 capture_interface = None  # None means capture from all interfaces
+capture_bpf_filter = None  # BPF filter for packet capture
 
 # Logging files
 f = open("output_logs.csv", 'w', newline='')
@@ -225,6 +226,7 @@ flows_csv_writer = None  # Start as None, will be set when needed
 flows_csv_lock: Lock = Lock()  # Synchronize concurrent file access
 
 DEFAULT_CSV_FILENAME = "flows.csv"
+DEFAULT_BPF_FILTER = "ip and (tcp or udp or icmp)"  # Default BPF filter for capturing relevant traffic
 MAX_FLOW_HISTORY = 1000  # Keep only recent flows to limit memory
 MAX_ACTIVE_FLOWS = 100  # Limit concurrent flows (older flows get removed, can not be reclassified)
 FLOW_TIMEOUT = 300 # Flow timeout in seconds
@@ -1393,12 +1395,12 @@ def snif_and_detect():
         else:
             print("Begin Sniffing on all interfaces".center(60, ' '))
 
-        # Only capture ICMP, TCP, and UDP packets
+        # Only able to capture ICMP, TCP, and UDP packets
         sniff(
             iface=capture_interface,  # None means all interfaces
             prn=newPacket,
             store=False,
-            filter="ip and (tcp or udp or icmp)"
+            filter=capture_bpf_filter if capture_bpf_filter else DEFAULT_BPF_FILTER
         )
 
         # Process remaining flows
@@ -1668,10 +1670,10 @@ def set_capture_interface(iface=None):
     else:
         print("Capture interface set to: all interfaces")
 
-def set_filter(bpf_filter=""):
+def set_filter(bpf_filter=DEFAULT_BPF_FILTER):
     """Set BPF filter for packet capture"""
-    global filter
-    filter = bpf_filter
+    global capture_bpf_filter
+    capture_bpf_filter = bpf_filter
     print(f"Capture filter set to: {bpf_filter}")
 
 def set_output_file(file_path=DEFAULT_CSV_FILENAME):
