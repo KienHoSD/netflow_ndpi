@@ -233,6 +233,36 @@ def main():
 
     args = parser.parse_args()
 
+    # Validate parameter constraints for web GUI mode
+    if args.output_mode == "web_gui":
+        # When -w is specified, only allow -i, --host, --port, --filter, -v
+        disallowed_params = []
+        
+        if args.input_file:
+            disallowed_params.append("-f/--file (use -i/--interface instead)")
+        if args.fields:
+            disallowed_params.append("--fields")
+        if args.version:
+            disallowed_params.append("--version")
+        if args.max_flows:
+            disallowed_params.append("--max-flows")
+        if args.max_time:
+            disallowed_params.append("--max-time")
+        if args.label is False or args.attack:
+            disallowed_params.append("--no-label/--attack")
+        
+        if disallowed_params:
+            print("Error: When using -w/--web, the following parameters are not allowed:")
+            for param in disallowed_params:
+                print(f"  - {param}")
+            print("\nAllowed parameters with -w/--web:")
+            print("  - -i/--interface  : Network interface to capture from")
+            print("  - --host          : Web GUI host address (default: 127.0.0.1)")
+            print("  - --port          : Web GUI port (default: 5000)")
+            print("  - --filter        : BPF filter string (default: 'ip and (tcp or udp or icmp)')")
+            print("  - -v/--verbose    : Verbose output")
+            return
+    
     if args.output_mode == "web_gui":
         try:
             from netflow.web_gui import app, socketio, set_capture_interface, set_filter, set_output_file
