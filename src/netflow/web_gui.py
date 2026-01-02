@@ -601,7 +601,7 @@ def process_flow_batch(flows_data):
         # Memory cleanup: delete graph objects after use
         del g_dgl, g, temp_df, nfeat_weight
 
-        # Multimodal (Fusion) Learning: Combine embeddings with raw features
+        # Fusion: Combine embeddings with raw features
         # This matches the training approach in the notebook
         df_emb = pd.DataFrame(embeddings)
         df_raw = X.copy().drop(columns=['h'])
@@ -1093,7 +1093,7 @@ def api_upload_anomaly_flows():
         # Memory cleanup
         del g_dgl, g, temp_df, nfeat_weight
         
-        # Multimodal (Fusion) Learning: Combine embeddings with raw features
+        # Fusion: Combine embeddings with raw features
         print(f"[Anomaly Detection] Fusing embeddings with raw features...")
         df_emb = pd.DataFrame(embeddings)
         df_raw = X.copy().drop(columns=['h'])
