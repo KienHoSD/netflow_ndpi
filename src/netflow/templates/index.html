@@ -40,7 +40,7 @@
       <li>Make sure the models are named properly to be detected by this system (e.g., <strong>best_dgi_CSE_multiclass_*.pkl</strong>, <strong>best_catboost_classifier_*.cbm/pkl/json</strong>, <strong>best_dgi_CSE_anomaly_*.pkl</strong>)</li>
       <li>For <strong>anomaly detection models</strong> (DGI model): Use all benign flows</li>
       <li>For <strong>multiclass detection models</strong> (DGI model and CatBoost model): Use balanced flows from labeled dataset</li>
-      <li>You can look at the <strong>Scores.ods</strong> file to understand why IsolationForest, CatBoost algorithms are chosen (Spoiler: they have the overall highest scores imo)</li>
+      <li>You can look at the <strong>Scores.ods</strong> file to understand why CBLOF and CatBoost algorithms are chosen (Spoiler: they have the overall highest scores imo)</li>
     </ul>
     
     <p><strong>Step 1: Load Models</strong></p>
@@ -54,7 +54,7 @@
     <ul>
       <li>Upload a CSV file containing flow data for anomaly detection (have at least 43 NetFlow V2 features) </li>
       <li>Configure the anomaly detection parameters (Max Flows, N Estimators, Contamination)</li>
-      <li>Click "Upload & Detect" to train the IsolationForest model</li>
+      <li>Click "Upload & Detect" to train the CBLOF (Cluster-Based Local Outlier Factor) model</li>
     </ul>
     
     <p><strong>Step 3: Monitor Network Flows</strong></p>
@@ -114,7 +114,7 @@
     <!-- Anomaly Detection Flows Panel -->
     <div class="panel panel-warning" style="margin-bottom: 20px;">
         <div class="panel-heading">
-            <h4 class="panel-title">Anomaly Detection Flows (IsolationForest)</h4>
+            <h4 class="panel-title">Anomaly Detection Flows (CBLOF)</h4>
         </div>
         <div class="panel-body">
             <div class="row">

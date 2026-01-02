@@ -29,7 +29,7 @@ import dgl.function as fn
 import networkx as nx
 import category_encoders as ce
 from sklearn.preprocessing import Normalizer
-from sklearn.ensemble import IsolationForest
+from pyod.models.cblof import CBLOF
 from catboost import CatBoostClassifier
 import itertools
 from werkzeug.utils import secure_filename
@@ -243,10 +243,10 @@ src_ip_dict = {}
 dgi_anomaly_flows = None  # DataFrame for anomaly detection
 anomaly_predictions = {}  # Store anomaly predictions by flow_id
 anomaly_flows_file = None  # Current loaded anomaly flows filename
-anomaly_model = None  # Trained IsolationForest model
+anomaly_model = None  # Trained CBLOF model
 anomaly_scaler = None  # Scaler for anomaly detection
 ANOMALY_FLOWS_DIR = os.path.join(MODULE_DIR, 'flows')
-anomaly_model_fitted = False  # Track if IsolationForest has been fitted
+anomaly_model_fitted = False  # Track if CBLOF has been fitted
 anomaly_feature_order = []  # Features used during training for consistency
 anomaly_cols_to_norm_trained = []  # Columns normalized during training
 
@@ -351,7 +351,7 @@ def get_available_models():
 
 def load_models(dgi_multiclass_model_name=None, multiclass_classify_model_name=None, dgi_anomaly_model_name=None):
     """Load specified models"""
-    global dgi_multiclass_model, catboost_multiclass_model, dgi_anomaly_model, encoder, scaler, models_loaded
+    global dgi_multiclass_model, multiclass_classify_model, dgi_anomaly_model, encoder, scaler, models_loaded
     global current_dgi_multiclass_model_name, current_multiclass_classify_model_name, current_dgi_anomaly_model_name
     
     with model_lock:
@@ -377,8 +377,8 @@ def load_models(dgi_multiclass_model_name=None, multiclass_classify_model_name=N
             
             multiclass_classify_path = os.path.join(MODULE_DIR, 'models', multiclass_classify_model_name)
             if os.path.exists(multiclass_classify_path):
-                catboost_multiclass_model = CatBoostClassifier()
-                catboost_multiclass_model.load_model(multiclass_classify_path)
+                multiclass_classify_model = CatBoostClassifier()
+                multiclass_classify_model.load_model(multiclass_classify_path)
                 current_multiclass_classify_model_name = multiclass_classify_model_name
                 print(f"Loaded Multiclass classify model: {multiclass_classify_model_name}")
 
@@ -429,7 +429,7 @@ def extract_flow_features(flow_data):
 
 
 def predict_anomaly(flow_features):
-    """Predict if a flow is anomalous using the trained IsolationForest model with DGI embeddings
+    """Predict if a flow is anomalous using the trained CBLOF model with DGI embeddings
     
     Args:
         flow_features: Dictionary of flow features
@@ -521,7 +521,7 @@ def predict_anomaly(flow_features):
         df_raw = X.copy().drop(columns=['h'])
         df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
         
-        # Predict with IsolationForest: -1 = anomaly, 1 = normal
+        # Predict with CBLOF: -1 = anomaly, 1 = normal
         prediction = anomaly_model.predict(df_fuse.to_numpy())[0]
         
         # Convert: -1 -> 1 (anomaly), 1 -> 0 (normal)
@@ -611,8 +611,8 @@ def process_flow_batch(flows_data):
         del df_emb, embeddings
 
         # Predict using CatBoost on fused features
-        predictions = catboost_multiclass_model.predict(df_fuse)
-        probabilities = catboost_multiclass_model.predict_proba(df_fuse)
+        predictions = multiclass_classify_model.predict(df_fuse)
+        probabilities = multiclass_classify_model.predict_proba(df_fuse)
 
         results = []
         for i, (pred, proba) in enumerate(zip(predictions, probabilities)):
@@ -982,7 +982,7 @@ def api_load_model():
 
 @app.route('/api/upload-anomaly-flows', methods=['POST'])
 def api_upload_anomaly_flows():
-    """Upload flows CSV file and train IsolationForest model for anomaly detection on new flows"""
+    """Upload flows CSV file and train CBLOF model for anomaly detection on new flows"""
     global dgi_anomaly_flows, anomaly_predictions, anomaly_flows_file, anomaly_model, anomaly_scaler, dgi_anomaly_model
     global anomaly_model_fitted, anomaly_feature_order, anomaly_cols_to_norm_trained
     
@@ -1102,9 +1102,9 @@ def api_upload_anomaly_flows():
         # Memory cleanup
         del df_emb, embeddings, X
         
-        # Train IsolationForest on fused features
-        print(f"[Anomaly Detection] Training IsolationForest with n_estimators={n_estimators}, contamination={contamination}")
-        anomaly_model = IsolationForest(n_estimators=n_estimators, contamination=contamination, random_state=42)
+        # Train CBLOF on fused features
+        print(f"[Anomaly Detection] Training CBLOF with n_estimators={n_estimators}, contamination={contamination}")
+        anomaly_model = CBLOF(n_estimators=n_estimators, contamination=contamination, random_state=42)
         anomaly_model.fit(df_fuse.to_numpy())
         
         # Store DataFrame and metadata
