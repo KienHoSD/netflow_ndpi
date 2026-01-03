@@ -1,6 +1,6 @@
 [project]
 name = "netflow"
-version = "1.1.0"
+version = "2.0.0"
 description = "NetFlow Python Implementation"
 authors = [{ name = "Kien Ho", email = "channelback546@gmail.com" }]
 readme = "README.md"
@@ -12,7 +12,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "numpy>=1.23.0,<2.0", # 1.23+ is stable on PyPy 3.11, <2.0 avoids breaking changes
+    "numpy>=1.23.0,<2.0",
     "scapy>=2.5.0",
     "requests>=2.31.0",
     "ndpi",
@@ -26,7 +26,7 @@ dependencies = [
     "plotly>=5.0.0",
     "torch==2.4.0",
     "pyod>=1.0.0",
-    "dgl==2.4.0+cu121",
+    "dgl==2.4.0",
 ]
 changelog = "CHANGELOG.md"
 homepage = "https://github.com/KienHoSD/netflow_ndpi"

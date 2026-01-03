@@ -18,8 +18,11 @@ $(document).ready(function(){
     });
     var messages_received = [];
     var currentPage = 1;
-    var maxPageSize = 1000;
+    var maxPageSize = 500;
     var pageSize = 100;
+    var default_MAX_FLOWS = 100000;
+    var default_N_ESTIMATORS = 50;
+    var default_CONTAMINATION = 0.01;
     // Restore liveMode from localStorage, default to true
     var liveMode = localStorage.getItem('liveMode') !== null ? localStorage.getItem('liveMode') === 'true' : true;
     var ctx = document.getElementById("myChart");
@@ -127,9 +130,9 @@ $(document).ready(function(){
             return;
         }
 
-        var maxFlows = parseInt($('#max-flows-input').val()) || 100000;
-        var nEstimators = parseInt($('#n-estimators-input').val()) || 50;
-        var contamination = parseFloat($('#contamination-input').val()) || 0.01;
+        var maxFlows = parseInt($('#max-flows-input').val()) || default_MAX_FLOWS
+        var nEstimators = parseInt($('#n-estimators-input').val()) || default_N_ESTIMATORS;
+        var contamination = parseFloat($('#contamination-input').val()) || default_CONTAMINATION;
 
         var formData = new FormData();
         formData.append('file', fileInput.files[0]);
@@ -331,7 +334,7 @@ $(document).ready(function(){
         '<span id="pagination-page">...</span> ' +
         '<button id="refresh-page" class="btn btn-sm btn-default">Refresh</button> ' +
         '<button id="live-page" class="btn btn-sm btn-primary">Live</button>' +
-        '<span style="margin-left: 20px;">Page Size (Max:1000):</span> ' +
+        '<span style="margin-left: 20px;">Page Size (Max: ' + maxPageSize + '):</span> ' +
         '<input type="number" id="page-size-input" min="1" value="' + pageSize + '" style="width: 80px; margin: 0 5px;"> ' +
         '<button id="set-page-size" class="btn btn-sm btn-info">Set</button> ' +
         '<span style="margin-left: 20px;">Flow Range:</span> ' +
@@ -351,8 +354,8 @@ $(document).ready(function(){
             alert('Please enter a valid page size (> 0)');
             return;
         }
-        if (newSize > 1000) {
-            alert('Page size too large, max is 1000');
+        if (newSize > maxPageSize) {
+            alert('Page size too large, max is ' + maxPageSize);
             return;
         }
         pageSize = newSize;
@@ -397,11 +400,7 @@ $(document).ready(function(){
 
     //receive details from server
     socket.on('newresult', function(msg) {
-        if (!liveMode) {
-            // Ignore live updates while viewing paginated history
-            return;
-        }
-        // live mode: append and rebuild (unlimited - no size restriction)
+        // Always record the flow, even if not currently in live mode
         messages_received.push(msg.result);
         
         // Store anomaly prediction if provided
@@ -409,9 +408,14 @@ $(document).ready(function(){
             anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
         }
 
-        // Trim messages if exceeding maxPageSize (1000)
+        // Trim messages if exceeding maxPageSize
         if (messages_received.length > maxPageSize) {
             messages_received = messages_received.slice(-maxPageSize);
+        }
+
+        // Only update UI if in live mode; otherwise keep data buffered
+        if (!liveMode) {
+            return;
         }
 
         var stickToBottom = isAtBottom(logContainer);

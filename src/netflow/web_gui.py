@@ -30,6 +30,7 @@ import networkx as nx
 import category_encoders as ce
 from sklearn.preprocessing import Normalizer
 from pyod.models.cblof import CBLOF
+from sklearn.ensemble import IsolationForest
 from catboost import CatBoostClassifier
 import itertools
 from werkzeug.utils import secure_filename
@@ -200,15 +201,28 @@ __author__ = 'kiensd'
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-app.config['DEBUG'] = True
+# Default to non-debug; enable only when caller (sniffer -v) asks for it
+app.config['DEBUG'] = False
 
-# turn the flask app into a socketio app
-socketio = SocketIO(app, async_mode=None, logger=True, engineio_logger=True)
+# Turn the flask app into a socketio app (quiet by default; toggled via configure_debug)
+socketio = SocketIO(app, async_mode=None, logger=False, engineio_logger=False)
+
+
+def configure_debug(verbose: bool = False):
+    """Toggle Flask/Socket.IO debug based on caller flag (e.g., sniffer -v)."""
+    debug_enabled = bool(verbose)
+    app.config['DEBUG'] = debug_enabled
+    # Keep Flask logger level in sync
+    app.logger.setLevel('DEBUG' if debug_enabled else 'INFO')
+    # Enable/disable Socket.IO logging noise
+    socketio.logger = debug_enabled
+    socketio.engineio_logger = debug_enabled
 
 # random result Generator Thread
 thread = Thread()
 gc_thread = Thread()
 thread_stop_event = Event()
+_workers_lock = Lock()  # Protects background worker startup
 
 # Configuration for packet capture
 capture_interface = None  # None means capture from all interfaces
@@ -227,14 +241,17 @@ flows_csv_lock: Lock = Lock()  # Synchronize concurrent file access
 
 DEFAULT_CSV_FILENAME = "flows.csv"
 DEFAULT_BPF_FILTER = "ip and (tcp or udp or icmp)"  # Default BPF filter for capturing relevant traffic
-MAX_FLOW_HISTORY = 1000  # Keep only recent flows to limit memory
-MAX_ACTIVE_FLOWS = 100  # Limit concurrent flows (older flows get removed, can not be reclassified)
-FLOW_TIMEOUT = 300 # Flow timeout in seconds
-BATCH_SIZE = 1  # Process flows immediately (1 = no batching, real-time classification)
+MAX_FLOW_HISTORY = 500  # Keep only recent flows to limit memory
+MAX_ACTIVE_FLOWS = 200  # Limit concurrent flows (older flows get removed, can not be reclassified)
+GC_SCAN_INTERVAL = 5  # Interval to scan for inactive flows in seconds
+GC_FLOW_TIMEOUT = 120  # Flow timeout in seconds - faster cleanup for short-lived flows like curl
+CLEANUP_BATCH_SIZE = 40  # Number of flows to cleanup when exceeding MAX_ACTIVE_FLOWS (Need to be smaller than MAX_ACTIVE_FLOWS)
+CLASSIFY_BATCH_SIZE = 15  # Emit immediately for fastest UI updates
 
 # Store flows for batch processing
 flow_objects_buffer = []  # Store Flow objects to access nDPI data
 flow_buffer = []
+flow_buffer_lock = Lock()  # Thread-safe access to flow_buffer and flow_objects_buffer
 current_flows = {}
 current_flows_lock = Lock()  # Thread-safe access to current_flows
 src_ip_dict = {}
@@ -243,10 +260,10 @@ src_ip_dict = {}
 dgi_anomaly_flows = None  # DataFrame for anomaly detection
 anomaly_predictions = {}  # Store anomaly predictions by flow_id
 anomaly_flows_file = None  # Current loaded anomaly flows filename
-anomaly_model = None  # Trained CBLOF model
+anomaly_model = None  # Trained Anomaly Model
 anomaly_scaler = None  # Scaler for anomaly detection
 ANOMALY_FLOWS_DIR = os.path.join(MODULE_DIR, 'flows')
-anomaly_model_fitted = False  # Track if CBLOF has been fitted
+anomaly_model_fitted = False  # Track if Model has been fitted
 anomaly_feature_order = []  # Features used during training for consistency
 anomaly_cols_to_norm_trained = []  # Columns normalized during training
 
@@ -308,7 +325,8 @@ netflow_features = [
 
 cols = ['FlowID'] + netflow_features + [
     'IPV4_SRC_ADDR', 'L4_SRC_PORT', 'IPV4_DST_ADDR', 'L4_DST_PORT',
-    'Attack', 'Label', 'Probability', 'Risk', 'All_Probabilities'
+    'Attack', 'Label', 'Probability', 'Risk', 'All_Probabilities', 
+    'App_Name', 'Start_Time', 'End_Time', 'Anomaly'
 ]
 
 flow_count = 0
@@ -429,7 +447,7 @@ def extract_flow_features(flow_data):
 
 
 def predict_anomaly(flow_features):
-    """Predict if a flow is anomalous using the trained CBLOF model with DGI embeddings
+    """Predict if a flow is anomalous using the trained Anomaly Model with DGI embeddings
     
     Args:
         flow_features: Dictionary of flow features
@@ -440,15 +458,12 @@ def predict_anomaly(flow_features):
     global anomaly_model, anomaly_scaler, dgi_anomaly_model, anomaly_model_fitted, anomaly_feature_order, anomaly_cols_to_norm_trained
     
     if anomaly_model is None:
-        print("[Anomaly Detection] Model not loaded")
         return None
     
     if not anomaly_model_fitted:
-        print("[Anomaly Detection] Model exists but is not fitted yet")
         return None
 
     if dgi_anomaly_model is None:
-        print("[Anomaly Detection] DGI anomaly model not loaded")
         return None
     
     try:
@@ -521,12 +536,15 @@ def predict_anomaly(flow_features):
         df_raw = X.copy().drop(columns=['h'])
         df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
         
-        # Predict with CBLOF: -1 = anomaly, 1 = normal
+        # Handle any remaining NaN values before predicting
+        df_fuse.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df_fuse.fillna(0, inplace=True)
+        
+        # Predict with Anomaly Model: -1 = anomaly, 1 = normal
         prediction = anomaly_model.predict(df_fuse.to_numpy())[0]
         
         # Convert: -1 -> 1 (anomaly), 1 -> 0 (normal)
         result = 1 if prediction == -1 else 0
-        print(f"[Anomaly Detection] Predicted: {result} (raw: {prediction})")
         return result
         
     except Exception as e:
@@ -713,35 +731,59 @@ def classify(flow_data, flow_obj=None):
     else:
         src_ip_dict[src_ip] = 1
 
-    # Add to buffer for batch processing
-    flow_buffer.append(features)
-    flow_objects_buffer.append(flow_obj)  # Store Flow object for nDPI data
+    # Add to buffer for batch processing (with lock to prevent race conditions)
+    with flow_buffer_lock:
+        flow_buffer.append(features)
+        flow_objects_buffer.append(flow_obj)  # Store Flow object for nDPI data
 
-    # Process batch if buffer is full
-    if len(flow_buffer) >= BATCH_SIZE:
-        print(f"[DEBUG] Buffer full! Processing batch of {len(flow_buffer)} flows...")
-        results = process_flow_batch(flow_buffer)
+        # Check if buffer is full
+        if len(flow_buffer) < CLASSIFY_BATCH_SIZE:
+            return feature_string + ['Pending...', 0.0, 'Processing']
+        
+        # Buffer is full: make local copy and clear while holding lock
+        batch_to_process = flow_buffer[:]
+        objects_to_process = flow_objects_buffer[:]
+        flow_buffer.clear()
+        flow_objects_buffer.clear()
+    
+        # Process batch outside the lock to avoid blocking other threads
+        print(f"[DEBUG] Buffer full! Processing batch of {len(batch_to_process)} flows...")
+        results = process_flow_batch(batch_to_process)
 
         if results and len(results) > 0:
-            print(f"[DEBUG] Got {len(results)} results for {len(flow_buffer)} flows")
+            print(f"[DEBUG] Got {len(results)} results for {len(batch_to_process)} flows")
             # Process only flows we have results for
-            num_flows_to_process = min(len(results), len(flow_buffer))
+            num_flows_to_process = min(len(results), len(batch_to_process))
 
             # Emit model-based results
             for idx in range(num_flows_to_process):
                 flow_count += 1  # Increment only when we have a valid result
                 current_flow_id = flow_count
-                flow_features = flow_buffer[idx]
-                flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
+                flow_features = batch_to_process[idx]
+                flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
                 result = results[idx]
 
                 classification = result['classification']
                 proba_score = result['probability']
                 probability_str = result.get('probability_str', '')
                 risk = result['risk']
+                
+                # Get app name from nDPI using Flow object (before creating record)
+                app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
+                # Get start and end times from Flow object
+                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
+                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
 
-                # Create record
+                # Create record with app_name and times included
                 label = 0 if classification == 'Benign' else 1
+                
+                # Predict anomaly for this flow before creating record
+                anomaly_pred = predict_anomaly(flow_features)
+                if anomaly_pred is not None:
+                    anomaly_predictions[current_flow_id] = anomaly_pred
+                else:
+                    anomaly_pred = 'N/A'
+                
                 record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
                     flow_features['IPV4_SRC_ADDR'],
                     flow_features['L4_SRC_PORT'],
@@ -751,7 +793,11 @@ def classify(flow_data, flow_obj=None):
                     label,
                     proba_score,
                     risk,
-                    json.dumps(result.get('all_probabilities', {}))
+                    json.dumps(result.get('all_probabilities', {})),
+                    app_name,
+                    start_time,
+                    end_time,
+                    anomaly_pred
                 ]
 
                 flow_df.loc[len(flow_df)] = record
@@ -785,14 +831,7 @@ def classify(flow_data, flow_obj=None):
                 start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
                 end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
                 flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
-                # Get app name from nDPI using Flow object
-                app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                # Predict anomaly for this flow
-                anomaly_pred = predict_anomaly(flow_features)
-                if anomaly_pred is not None:
-                    anomaly_predictions[current_flow_id] = anomaly_pred
-                else:
-                    anomaly_pred = 'N/A'
+                # anomaly_pred already calculated and stored in record
 
                 display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
                                 protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
@@ -804,14 +843,24 @@ def classify(flow_data, flow_obj=None):
                               "anomaly_pred": anomaly_pred}, namespace='/test')
         else:
             # Fallback: emit placeholder rows so UI is not empty
-            for idx, flow_features in enumerate(flow_buffer):
+            for idx, flow_features in enumerate(batch_to_process):
                 flow_count += 1  # Increment only when actually creating a flow
                 current_flow_id = flow_count
-                flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
+                flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
                 classification = 'Pending'
                 label = 1  # Treat pending as potentially malicious
                 proba_score = 0.0
                 risk = 'Processing'
+                # Get app name and times for placeholder
+                app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
+                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
+                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
+                # Predict anomaly for placeholder flow
+                anomaly_pred = predict_anomaly(flow_features)
+                if anomaly_pred is not None:
+                    anomaly_predictions[current_flow_id] = anomaly_pred
+                else:
+                    anomaly_pred = 'N/A'
                 record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
                     flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'),
                     flow_features.get('L4_SRC_PORT', '0'),
@@ -821,7 +870,11 @@ def classify(flow_data, flow_obj=None):
                     label,
                     proba_score,
                     risk,
-                    json.dumps({})
+                    json.dumps({}),
+                    app_name,
+                    start_time,
+                    end_time,
+                    anomaly_pred
                 ]
                 flow_df.loc[len(flow_df)] = record
 
@@ -838,30 +891,19 @@ def classify(flow_data, flow_obj=None):
                 disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
                 disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
                 protocol = flow_features.get('PROTOCOL', 0)
-                # Get start and end times from Flow object
-                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
-                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
                 flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
-                app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                # Predict anomaly for this flow
-                anomaly_pred = predict_anomaly(flow_features)
-                if anomaly_pred is not None:
-                    anomaly_predictions[current_flow_id] = anomaly_pred
-                else:
-                    anomaly_pred = 'N/A'
+                # Get app name from placeholder record
+                app_name_display = app_name
+                # anomaly_pred already calculated and stored in record
 
                 display = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport, protocol,
-                           start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
+                           start_time, end_time, flow_duration, app_name_display, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display,
                               "ips": json.loads(ip_data_json),
                               "all_probs": {},  
                               "prob_str": "",
                               "flow_id": current_flow_id,
                               "anomaly_pred": anomaly_pred}, namespace='/test')
-
-        # Clear buffers
-        flow_buffer = []
-        flow_objects_buffer = []
 
     return feature_string + ['Pending...', 0.0, 'Processing']
 
@@ -982,7 +1024,7 @@ def api_load_model():
 
 @app.route('/api/upload-anomaly-flows', methods=['POST'])
 def api_upload_anomaly_flows():
-    """Upload flows CSV file and train CBLOF model for anomaly detection on new flows"""
+    """Upload flows CSV file and train Anomaly Model for anomaly detection on new flows"""
     global dgi_anomaly_flows, anomaly_predictions, anomaly_flows_file, anomaly_model, anomaly_scaler, dgi_anomaly_model
     global anomaly_model_fitted, anomaly_feature_order, anomaly_cols_to_norm_trained
     
@@ -1102,9 +1144,21 @@ def api_upload_anomaly_flows():
         # Memory cleanup
         del df_emb, embeddings, X
         
-        # Train CBLOF on fused features
-        print(f"[Anomaly Detection] Training CBLOF with n_estimators={n_estimators}, contamination={contamination}")
-        anomaly_model = CBLOF(n_estimators=n_estimators, contamination=contamination, random_state=42)
+        # Handle any remaining NaN values before fitting
+        print(f"[Anomaly Detection] Handling NaN values in fused features...")
+        df_fuse.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df_fuse.fillna(0, inplace=True)
+        
+        # Verify no NaN or inf values remain
+        if df_fuse.isnull().any().any():
+            print(f"[Anomaly Detection] Warning: Still found NaN values after cleaning")
+        if np.isinf(df_fuse.values).any():
+            print(f"[Anomaly Detection] Warning: Still found inf values after cleaning")
+        
+        # Train Anomaly Model on fused features
+        print(f"[Anomaly Detection] Training with N={n_estimators}, contamination={contamination}")
+        # anomaly_model = CBLOF(n_clusters=n_estimators, contamination=contamination, random_state=42)
+        anomaly_model = IsolationForest(n_estimators=n_estimators, contamination=contamination, random_state=42)
         anomaly_model.fit(df_fuse.to_numpy())
         
         # Store DataFrame and metadata
@@ -1156,15 +1210,13 @@ def api_flows():
     for _, row in page_df.iterrows():
         flow_id = int(row.get('FlowID', 0))
         protocol = row.get('PROTOCOL', 0)
-        # Get start and end times from row if available (they should be in milliseconds)
-        start_ms = row.get('FLOW_START_MILLISECONDS', 0)
-        end_ms = row.get('FLOW_END_MILLISECONDS', 0)
-        start_time = format_timestamp_to_time(start_ms / 1000) if start_ms else "N/A"
-        end_time = format_timestamp_to_time(end_ms / 1000) if end_ms else "N/A"
+        # Get start and end times from stored columns
+        start_time = row.get('Start_Time', 'N/A')
+        end_time = row.get('End_Time', 'N/A')
         duration = row.get('FLOW_DURATION_MILLISECONDS', 0)
-        app_name = 'Unknown'
-        # Get anomaly prediction if available
-        anomaly_pred = anomaly_predictions.get(flow_id, 'N/A')
+        app_name = row.get('App_Name', 'Unknown')
+        # Get anomaly prediction from stored column (fallback to dictionary if not in column)
+        anomaly_pred = row.get('Anomaly', anomaly_predictions.get(flow_id, 'N/A'))
         display = [
             flow_id,
             str(row.get('IPV4_SRC_ADDR', '0.0.0.0')),
@@ -1208,123 +1260,28 @@ def newPacket(packet: Packet):
             flows_count = len(current_flows)
         
         if flows_count >= MAX_ACTIVE_FLOWS:
-            # Force cleanup of oldest flows - process immediately
+            # Print warning
+            print(f"[DEBUG] Active flows exceeded limit ({flows_count} >= {MAX_ACTIVE_FLOWS}). Cleaning up {CLEANUP_BATCH_SIZE} oldest flows.")
+
+            # Force cleanup of oldest flows in a small batch without flushing the whole buffer            
+            flows_to_cleanup = []
             with current_flows_lock:
                 if len(current_flows) > 0:
-                    oldest_key = min(current_flows.keys(), key=lambda k: current_flows[k].latest_timestamp)
-                    flow_data = current_flows[oldest_key].get_data()
-                    flow_obj = current_flows[oldest_key]
-                else:
-                    oldest_key = None
-            
-            if oldest_key is None:
+                    sorted_keys = sorted(current_flows.keys(), key=lambda k: current_flows[k].latest_timestamp)
+                    for key in sorted_keys[:CLEANUP_BATCH_SIZE]:
+                        flow_obj = current_flows[key]
+                        flows_to_cleanup.append((key, flow_obj.get_data(), flow_obj))
+
+            if len(flows_to_cleanup) == 0:
                 return
             
-            # Add to buffer
-            classify(flow_data, flow_obj)
-            
-            # Force immediate processing of buffer to ensure cleanup flow is evaluated
-            global flow_buffer, flow_objects_buffer, flow_df, flow_count
-            if len(flow_buffer) > 0:
-                print(f"[FORCE_CLEANUP] Processing {len(flow_buffer)} buffered flow(s) before deletion...")
-                results = process_flow_batch(flow_buffer)
-                
-                if results and len(results) > 0:
-                    # Process and emit results immediately
-                    num_flows = min(len(results), len(flow_buffer))
-                    for idx in range(num_flows):
-                        flow_count += 1  # Increment only when actually creating a flow
-                        current_flow_id = flow_count
-                        flow_features = flow_buffer[idx]
-                        flow_object = flow_objects_buffer[idx] if idx < len(flow_objects_buffer) else None
-                        result = results[idx]
-                        
-                        classification = result['classification']
-                        proba_score = result['probability']
-                        probability_str = result.get('probability_str', '')
-                        risk = result['risk']
-                        
-                        # Save to dataframe and CSV - update if exists, otherwise create
-                        label = 0 if classification == 'Benign' else 1
-                        
-                        # Create record for CSV
-                        record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
-                            flow_features['IPV4_SRC_ADDR'],
-                            flow_features['L4_SRC_PORT'],
-                            flow_features['IPV4_DST_ADDR'],
-                            flow_features['L4_DST_PORT'],
-                            classification,
-                            label,
-                            proba_score,
-                            risk,
-                            json.dumps(result.get('all_probabilities', {}))
-                        ]
-                        
-                        # Check if this flow ID already exists in the dataframe
-                        existing_flow = flow_df[flow_df['FlowID'] == current_flow_id]
-                        
-                        if len(existing_flow) > 0:
-                            # Update existing row
-                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Attack'] = classification
-                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Label'] = label
-                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Probability'] = proba_score
-                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'Risk'] = risk
-                            flow_df.loc[flow_df['FlowID'] == current_flow_id, 'All_Probabilities'] = json.dumps(result.get('all_probabilities', {}))
-                            # Update features too
-                            for feat in netflow_features:
-                                flow_df.loc[flow_df['FlowID'] == current_flow_id, feat] = flow_features.get(feat, 0)
-                        else:
-                            # Create new row
-                            flow_df.loc[len(flow_df)] = record
-                        
-                        # Update CSV file
-                        update_flow_in_csv(current_flow_id, record)
-                        
-                        if len(flow_df) > MAX_FLOW_HISTORY:
-                            flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
-                        
-                        # Log
-                        output_log.writerow([f'Flow #{current_flow_id} (Force Cleanup)'])
-                        output_log.writerow(['Attack:'] + [classification] + [proba_score])
-                        output_log.writerow(['All Probabilities:'] + [probability_str])
-                        output_log.writerow(['--------------------------------------------------------------------------------------------------'])
-                        
-                        # Emit to web
-                        ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
-                        ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
-                        
-                        disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
-                        disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
-                        disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
-                        disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
-                        protocol = flow_features.get('PROTOCOL', 0)
-                        # Get start and end times from Flow object
-                        start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
-                        end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
-                        flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
-                        app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                        # Predict anomaly for this flow
-                        anomaly_pred = predict_anomaly(flow_features)
-                        if anomaly_pred is not None:
-                            anomaly_predictions[current_flow_id] = anomaly_pred
-                        else:
-                            anomaly_pred = 'N/A'
-                        
-                        display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                                        protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
-                        socketio.emit('newresult', {'result': display_data,
-                                      "ips": json.loads(ip_data_json),
-                                      "all_probs": result.get('all_probabilities', {}),
-                                      "prob_str": probability_str,
-                                      "flow_id": current_flow_id,
-                                      "anomaly_pred": anomaly_pred}, namespace='/test')
-                
-                # Clear buffer after processing
-                flow_buffer = []
-                flow_objects_buffer = []
+            # Add oldest flows to buffer for classification
+            for _, flow_data, flow_obj in flows_to_cleanup:
+                classify(flow_data, flow_obj)
             
             with current_flows_lock:
-                current_flows.pop(oldest_key, None)
+                for key, _, _ in flows_to_cleanup:
+                    current_flows.pop(key, None)
         
         # Get flow key
         direction = PacketDirection.FORWARD
@@ -1349,7 +1306,7 @@ def newPacket(packet: Packet):
             # Add packet to existing flow
             flow.add_packet(packet, PacketDirection.FORWARD)
 
-            # Check for flow termination (FIN or RST)
+            # Check for flow termination (FIN or RST) or if it looks complete
             if packet.haslayer("TCP"):
                 tcp = packet["TCP"]
                 if tcp.flags & 0x01 or tcp.flags & 0x04:  # FIN or RST
@@ -1415,7 +1372,7 @@ def snif_and_detect():
             flow_objects_buffer.clear()
 
 
-def garbage_collect_inactive_flows(scan_interval_seconds: int = 5):
+def garbage_collect_inactive_flows(scan_interval_seconds: int = GC_SCAN_INTERVAL):
     """Background task to remove inactive flows from memory.
 
     A flow is considered inactive if now - latest_timestamp > FLOW_TIMEOUT.
@@ -1435,7 +1392,7 @@ def garbage_collect_inactive_flows(scan_interval_seconds: int = 5):
             # Check each flow for timeout (without holding lock)
             for key, flow in flows_snapshot:
                 try:
-                    if (now - flow.latest_timestamp) > FLOW_TIMEOUT:
+                    if (now - flow.latest_timestamp) > GC_FLOW_TIMEOUT:
                         flow_data = flow.get_data()
                         stale_flows.append((key, flow_data, flow))
                 except Exception as e:
@@ -1549,21 +1506,22 @@ def flow_detail():
     )
 
 
+def start_background_workers():
+    """Ensure sniffer and GC threads are running (idempotent)."""
+    global thread, gc_thread
+    with _workers_lock:
+        if not thread.is_alive():
+            print("Starting Sniffer Thread")
+            thread = socketio.start_background_task(snif_and_detect)
+        if not gc_thread.is_alive():
+            print("Starting Garbage Collector Thread")
+            gc_thread = socketio.start_background_task(garbage_collect_inactive_flows)
+
+
 @socketio.on('connect', namespace='/test')
 def test_connect():
-    # need visibility of the global thread object
-    global thread, gc_thread
     print('Client connected')
-
-    # Start the random result generator thread only if the thread has not been started before.
-    if not thread.is_alive():
-        print("Starting Sniffer Thread")
-        thread = socketio.start_background_task(snif_and_detect)
-
-    # Start garbage collector thread if not already running
-    if not gc_thread.is_alive():
-        print("Starting Garbage Collector Thread")
-        gc_thread = socketio.start_background_task(garbage_collect_inactive_flows)
+    start_background_workers()
 
 
 @socketio.on('disconnect', namespace='/test')
@@ -1710,4 +1668,6 @@ _ensure_flows_csv()
 
 
 if __name__ == '__main__':
+    # Ensure background workers are started even if no client connects yet
+    start_background_workers()
     socketio.run(app)

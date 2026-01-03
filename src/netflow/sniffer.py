@@ -265,7 +265,7 @@ def main():
     
     if args.output_mode == "web_gui":
         try:
-            from netflow.web_gui import app, socketio, set_capture_interface, set_filter, set_output_file
+            from netflow.web_gui import app, socketio, set_capture_interface, set_filter, set_output_file, configure_debug
             
             # Set the interface if provided
             if args.input_interface:
@@ -290,6 +290,9 @@ def main():
             print("=" * 60)
             print(f"\nOpen http://{host}:{port} in your browser to view the dashboard")
             print("Press Ctrl+C to stop\n")
+
+            # Only enable debug/log noise when -v/--verbose is provided
+            configure_debug(args.verbose)
             socketio.run(app, host=host, port=port, debug=args.verbose)
             return
         except ImportError as e:
