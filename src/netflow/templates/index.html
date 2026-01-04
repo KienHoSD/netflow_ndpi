@@ -134,6 +134,15 @@
                     <label for="contamination-input">Contamination:</label>
                     <input type="number" id="contamination-input" class="form-control" value="0.01" min="0.001" max="1" step="0.001">
                 </div>
+                <div class="col-md-2">
+                    <label for="anomaly-algorithm-select">Algorithm:</label>
+                    <select id="anomaly-algorithm-select" class="form-control">
+                        <option value="IF">IsolationForest</option>
+                        <option value="CBLOF">CBLOF</option>
+                        <option value="HBOS">HBOS</option>
+                        <option value="PCA">PCA</option>
+                    </select>
+                </div>
                 <div class="col-md-3">
                     <label>&nbsp;</label>
                     <button id="upload-anomaly-flows-btn" class="btn btn-warning btn-block">Upload & Detect</button>

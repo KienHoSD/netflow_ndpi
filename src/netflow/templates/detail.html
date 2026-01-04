@@ -23,8 +23,8 @@
 <body>
 <div class="container">
   <div class="jumbotron">
-    <h1>APT Detection System</h1>
-    <p>By DK</p>
+    <h1>DK-APT Detection System</h1>
+    <p>By DanhLe, KienHo</p>
     <div style="text-align: center; margin-top: 20px;">
       <button class="btn btn-primary" onclick="goBack()">Back to Flows</button>
       <button class="btn btn-warning" id="re-eval-btn" style="margin-left: 10px;">Re-evaluate Flow</button>
@@ -34,10 +34,19 @@
 
 <div class="container">
   <b>
-  <h3 align="center">
-  {{ risk|safe }}
-  </h3>
+  <h3 align="center">Risk: {{ risk|safe }}</h3>
   </b>
+</div>
+<div class="container">
+  <h3 align="center">Anomaly Result:</h3>
+  {% set anom_lower = anomaly_result|lower %}
+  {% if 'anomaly' in anom_lower %}
+    <h3 align="center" style="color: red;">{{ anomaly_result }}</h4>
+  {% elif 'normal' in anom_lower %}
+    <h3 align="center" style="color: green;">{{ anomaly_result }}</h4>
+  {% else %}
+    <h3 align="center" style="color: #666;">{{ anomaly_result }}</h4>
+  {% endif %}
 </div>
 <hr>
 

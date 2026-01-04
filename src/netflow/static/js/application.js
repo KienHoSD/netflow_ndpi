@@ -133,12 +133,14 @@ $(document).ready(function(){
         var maxFlows = parseInt($('#max-flows-input').val()) || default_MAX_FLOWS
         var nEstimators = parseInt($('#n-estimators-input').val()) || default_N_ESTIMATORS;
         var contamination = parseFloat($('#contamination-input').val()) || default_CONTAMINATION;
+        var algorithm = $('#anomaly-algorithm-select').val() || 'IF';
 
         var formData = new FormData();
         formData.append('file', fileInput.files[0]);
         formData.append('max_flows', maxFlows);
         formData.append('n_estimators', nEstimators);
         formData.append('contamination', contamination);
+        formData.append('algorithm', algorithm);
 
         $(this).prop('disabled', true).text('Processing...');
         $('#anomaly-flows-status').text('Uploading and detecting anomalies...');
@@ -153,7 +155,8 @@ $(document).ready(function(){
                 if (resp.success) {
                     anomalyFlowsLoaded = true;
                     anomalyPredictions = {}; // Reset predictions
-                    $('#anomaly-flows-status').text('Loaded: ' + resp.filename + ' - Model trained on ' + resp.total_flows + ' flows. Predicting anomalies on new flows...');
+                    var alg = resp.algorithm || algorithm;
+                    $('#anomaly-flows-status').text('Loaded: ' + resp.filename + ' - ' + alg + ' trained on ' + resp.total_flows + ' flows. Predicting anomalies on new flows...');
                     alert('Anomaly detection model loaded!\nTrained on ' + resp.total_flows + ' flows.\n' + (resp.message || 'Ready to detect anomalies on new flows.'));
                     
                     // Refresh the table to show anomaly column
@@ -269,7 +272,7 @@ $(document).ready(function(){
                         var anomalyText = anomalyPred === 1 ? '<span style="color: red; font-weight: bold;">Anomaly</span>' : '<span style="color: green;">Normal</span>';
                         messages_string += '<td>' + anomalyText + '</td>';
                     } else {
-                        messages_string += '<td>N/A</td>';
+                        messages_string += '<td>Unknown</td>';
                     }
                 } else {
                     messages_string += '<td>' + arr[i][j].toString() + '</td>';
@@ -300,8 +303,9 @@ $(document).ready(function(){
             // Restore anomaly model status
             if (resp.anomaly_model_status && resp.anomaly_model_status.loaded) {
                 anomalyFlowsLoaded = true;
+                var alg = resp.anomaly_model_status.algorithm || 'IsolationForest';
                 $('#anomaly-flows-status').text('Loaded: ' + resp.anomaly_model_status.filename + 
-                    ' - Model trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
+                    ' - ' + alg + ' trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
             }
             rebuildTableFromArray(messages_received);
             // update controls text
@@ -320,8 +324,9 @@ $(document).ready(function(){
             $.getJSON('/api/flows', { page_size: 0 }, function(resp) {
                 if (resp.anomaly_model_status && resp.anomaly_model_status.loaded) {
                     anomalyFlowsLoaded = true;
+                    var alg = resp.anomaly_model_status.algorithm || 'IsolationForest';
                     $('#anomaly-flows-status').text('Loaded: ' + resp.anomaly_model_status.filename + 
-                        ' - Model trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
+                        ' - ' + alg + ' trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
                 }
             });
             $('#pagination-page').text('Live');
@@ -443,7 +448,6 @@ $(document).ready(function(){
         // Find and update the flow in messages_received
         for (var i = 0; i < messages_received.length; i++) {
             if (messages_received[i][0] == msg.flow_id) {
-                // Update anomaly (index 8), classification (index 9), probability (index 10), and risk (index 11)
                 if (msg.anomaly_pred !== undefined) {
                     messages_received[i][10] = msg.anomaly_pred;
                 }

@@ -30,6 +30,8 @@ import networkx as nx
 import category_encoders as ce
 from sklearn.preprocessing import Normalizer
 from pyod.models.cblof import CBLOF
+from pyod.models.hbos import HBOS
+from pyod.models.pca import PCA
 from sklearn.ensemble import IsolationForest
 from catboost import CatBoostClassifier
 import itertools
@@ -203,6 +205,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
 # Default to non-debug; enable only when caller (sniffer -v) asks for it
 app.config['DEBUG'] = False
+app.config['TEMPLATES_AUTO_RELOAD'] = True  # Auto-reload templates on change
 
 # Turn the flask app into a socketio app (quiet by default; toggled via configure_debug)
 socketio = SocketIO(app, async_mode=None, logger=False, engineio_logger=False)
@@ -247,25 +250,34 @@ GC_SCAN_INTERVAL = 5  # Interval to scan for inactive flows in seconds
 GC_FLOW_TIMEOUT = 120  # Flow timeout in seconds - faster cleanup for short-lived flows like curl
 CLEANUP_BATCH_SIZE = 40  # Number of flows to cleanup when exceeding MAX_ACTIVE_FLOWS (Need to be smaller than MAX_ACTIVE_FLOWS)
 CLASSIFY_BATCH_SIZE = 15  # Emit immediately for fastest UI updates
+ROUND_PROBABILITY_DIGITS = 4  # Number of decimal places to round probabilities
 
 # Store flows for batch processing
 flow_objects_buffer = []  # Store Flow objects to access nDPI data
 flow_buffer = []
 flow_buffer_lock = Lock()  # Thread-safe access to flow_buffer and flow_objects_buffer
+process_batch_lock = Lock()  # Thread-safe access to process_flow_batch to prevent race conditions
 current_flows = {}
 current_flows_lock = Lock()  # Thread-safe access to current_flows
 src_ip_dict = {}
+src_ip_dict_lock = Lock()  # Thread-safe access to src_ip_dict
+flow_count = 0
+flow_count_lock = Lock()  # Thread-safe access to flow_count
+flow_df_lock = Lock()  # Thread-safe access to flow_df
 
 # Anomaly detection flows
 dgi_anomaly_flows = None  # DataFrame for anomaly detection
 anomaly_predictions = {}  # Store anomaly predictions by flow_id
+anomaly_predictions_lock = Lock()  # Thread-safe access to anomaly_predictions
 anomaly_flows_file = None  # Current loaded anomaly flows filename
 anomaly_model = None  # Trained Anomaly Model
 anomaly_scaler = None  # Scaler for anomaly detection
+anomaly_algorithm = "IsolationForest"  # Current anomaly algorithm
 ANOMALY_FLOWS_DIR = os.path.join(MODULE_DIR, 'flows')
 anomaly_model_fitted = False  # Track if Model has been fitted
 anomaly_feature_order = []  # Features used during training for consistency
 anomaly_cols_to_norm_trained = []  # Columns normalized during training
+anomaly_data_lock = Lock()  # Thread-safe access to all anomaly-related globals
 
 def _ensure_flows_csv(file_path=DEFAULT_CSV_FILENAME):
     """Lazily open the flows CSV with safe defaults and header if empty."""
@@ -559,136 +571,145 @@ def process_flow_batch(flows_data):
     if not models_loaded or len(flows_data) == 0:
         return []
 
-    try:
-        # Create DataFrame from flows
-        df = pd.DataFrame(flows_data)
+    # # Use lock to prevent concurrent processing (e.g., during re-evaluation)
+    with process_batch_lock:
+        try:
+            # Create DataFrame from flows
+            df = pd.DataFrame(flows_data)
 
-        # Handle inf values
-        df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df.fillna(0, inplace=True)
+            # Handle inf values
+            df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df.fillna(0, inplace=True)
 
-        # Encode categorical features - convert to numeric codes
-        X = df[netflow_features].copy()
+            # Encode categorical features - convert to numeric codes
+            X = df[netflow_features].copy()
 
-        for col in categorical_cols:
-            if col in X.columns:
-                # Convert to categorical codes (numeric)
-                X[col] = pd.Categorical(X[col].astype(str)).codes
+            for col in categorical_cols:
+                if col in X.columns:
+                    # Convert to categorical codes (numeric)
+                    X[col] = pd.Categorical(X[col].astype(str)).codes
 
-        # Ensure all columns are numeric
-        X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+            # Ensure all columns are numeric
+            X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
 
-        # Normalize numerical features
-        X[cols_to_norm] = scaler.fit_transform(X[cols_to_norm])
+            # Normalize numerical features (use local scaler to avoid race conditions)
+            local_scaler = Normalizer()
+            X[cols_to_norm] = local_scaler.fit_transform(X[cols_to_norm])
+            # X[cols_to_norm] = scaler.transform(X[cols_to_norm])
 
-        # Create feature vector for each edge - now all numeric
-        X['h'] = X.values.tolist()
+            # Create feature vector for each edge - now all numeric
+            X['h'] = X.values.tolist()
 
-        # Build graph from flows
-        temp_df = pd.concat([X[['h']], df[['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']]], axis=1)
+            # Build graph from flows
+            temp_df = pd.concat([X[['h']], df[['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']]], axis=1)
 
-        g = nx.from_pandas_edgelist(
-            temp_df,
-            "IPV4_SRC_ADDR",
-            "IPV4_DST_ADDR",
-            ["h"],
-            create_using=nx.MultiGraph()
-        )
-        g = g.to_directed()
+            g = nx.from_pandas_edgelist(
+                temp_df,
+                "IPV4_SRC_ADDR",
+                "IPV4_DST_ADDR",
+                ["h"],
+                create_using=nx.MultiGraph()
+            )
+            g = g.to_directed()
 
-        # Convert to DGL
-        g_dgl = dgl.from_networkx(g, edge_attrs=['h'])
+            # Convert to DGL
+            g_dgl = dgl.from_networkx(g, edge_attrs=['h'])
 
-        # Initialize node features on the correct device
-        nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(netflow_features)], device=device)
-        g_dgl.ndata['h'] = torch.reshape(nfeat_weight, (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
+            # Initialize node features on the correct device
+            nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(netflow_features)], device=device)
+            g_dgl.ndata['h'] = torch.reshape(nfeat_weight, (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
 
-        # Reshape edge features and ensure they are on the device
-        g_dgl.edata['h'] = torch.reshape(g_dgl.edata['h'],
-                                         (g_dgl.edata['h'].shape[0], 1,
-                                          g_dgl.edata['h'].shape[1])).to(device)
+            # Reshape edge features and ensure they are on the device
+            g_dgl.edata['h'] = torch.reshape(g_dgl.edata['h'],
+                                            (g_dgl.edata['h'].shape[0], 1,
+                                            g_dgl.edata['h'].shape[1])).to(device)
 
-        # Move graph data to device (DGL will keep graph structure and move tensors)
-        g_dgl = g_dgl.to(device)
+            # Move graph data to device (DGL will keep graph structure and move tensors)
+            g_dgl = g_dgl.to(device)
 
-        # Get embeddings from DGI
-        with torch.no_grad():
-            embeddings = dgi_multiclass_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
-            embeddings = embeddings.detach().cpu().numpy()
-        
-        # Memory cleanup: delete graph objects after use
-        del g_dgl, g, temp_df, nfeat_weight
-
-        # Fusion: Combine embeddings with raw features
-        # This matches the training approach in the notebook
-        df_emb = pd.DataFrame(embeddings)
-        df_raw = X.copy().drop(columns=['h'])
-        df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
-        
-        # Memory cleanup
-        del df_emb, embeddings
-
-        # Predict using CatBoost on fused features
-        predictions = multiclass_classify_model.predict(df_fuse)
-        probabilities = multiclass_classify_model.predict_proba(df_fuse)
-
-        results = []
-        for i, (pred, proba) in enumerate(zip(predictions, probabilities)):
-            max_proba = float(proba.max())
-
-            # Calculate risk based on probability
-            if pred != 0:  # Not benign
-                risk_score = float(proba[int(pred)] if int(pred) < len(proba) else max_proba)
-            else:
-                risk_score = float(1 - proba[0])  # Risk is inverse of benign probability
-
-            if risk_score > 0.8:
-                risk = "<p style=\"color:red;\">Very High</p>"
-            elif risk_score > 0.6:
-                risk = "<p style=\"color:orangered;\">High</p>"
-            elif risk_score > 0.4:
-                risk = "<p style=\"color:orange;\">Medium</p>"
-            elif risk_score > 0.2:
-                risk = "<p style=\"color:green;\">Low</p>"
-            else:
-                risk = "<p style=\"color:limegreen;\">Minimal</p>"
-
-            # attack_types = ['Benign', 'Brute Force -Web', 'Brute Force -XSS',
-            #                 'DoS attacks-GoldenEye', 'DoS attacks-Hulk',
-            #                 'DoS attacks-SlowHTTPTest', 'DoS attacks-Slowloris',
-            #                 'FTP-BruteForce', 'Infilteration', 'SQL Injection',
-            #                 'SSH-Bruteforce'] # UNSW-NB15 types
-            attack_types = ['Benign', 'FTP-BruteForce', 'SSH-Bruteforce',
-                            'DoS_attacks-GoldenEye', 'DoS_attacks-Slowloris',
-                            'DoS_attacks-SlowHTTPTest', 'DoS_attacks-Hulk',
-                            'DDoS_attacks-LOIC-HTTP', 'DDOS_attack-LOIC-UDP',
-                            'DDOS_attack-HOIC', 'Brute_Force_-Web', 'Brute_Force_-XSS',
-                            'SQL_Injection', 'Infilteration', 'Bot'] # CIC-IDS2017 types
-            classification = attack_types[int(pred)] if int(pred) < len(attack_types) else 'Unknown'
-
-            # Create probability breakdown for all attack types
-            all_probabilities = {}
-            for idx, attack_type in enumerate(attack_types):
-                if idx < len(proba):
-                    all_probabilities[attack_type] = float(proba[idx])
+            # Get embeddings from DGI
+            with torch.no_grad():
+                embeddings = dgi_multiclass_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
+                embeddings = embeddings.detach().cpu().numpy()
             
-            # Sort by probability (descending)
-            sorted_probs = sorted(all_probabilities.items(), key=lambda x: x[1], reverse=True)
-            prob_str = ', '.join([f"{attack}: {prob*100:.1f}%" for attack, prob in sorted_probs])
+            # Memory cleanup: delete graph objects after use
+            del g_dgl, g, temp_df, nfeat_weight
 
-            results.append({
-                'classification': classification,
-                'probability': max_proba,
-                'all_probabilities': all_probabilities,
-                'probability_str': prob_str,
-                'risk': risk
-            })
+            # Fusion: Combine embeddings with raw features
+            # This matches the training approach in the notebook
+            df_emb = pd.DataFrame(embeddings)
+            df_raw = X.copy().drop(columns=['h'])
+            df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
+            
+            # Memory cleanup
+            del df_emb, embeddings
 
-        return results
+            # Predict using CatBoost on fused features
+            predictions = multiclass_classify_model.predict(df_fuse)
+            probabilities = multiclass_classify_model.predict_proba(df_fuse)
 
-    except Exception as e:
-        traceback.print_exc()
-        return []
+            results = []
+            for i, (pred, proba) in enumerate(zip(predictions, probabilities)):
+                max_proba = round(float(proba.max()), ROUND_PROBABILITY_DIGITS)
+
+                # Calculate risk based on probability
+                if pred != 0:  # Not benign
+                    risk_score = float(proba[int(pred)] if int(pred) < len(proba) else max_proba)
+                else:
+                    risk_score = float(1 - proba[0])  # Risk is inverse of benign probability
+
+                if risk_score > 0.8:
+                    # risk = "Very High"
+                    risk = "<p style=\"color:red;\">Very High</p>"
+                elif risk_score > 0.6:
+                    # risk = "High"
+                    risk = "<p style=\"color:orangered;\">High</p>"
+                elif risk_score > 0.4:
+                    # risk = "Medium"
+                    risk = "<p style=\"color:orange;\">Medium</p>"
+                elif risk_score > 0.2:
+                    # risk = "Low"
+                    risk = "<p style=\"color:green;\">Low</p>"
+                else:
+                    # risk = "Minimal"
+                    risk = "<p style=\"color:limegreen;\">Minimal</p>"
+
+                # attack_types = ['Benign', 'Brute Force -Web', 'Brute Force -XSS',
+                #                 'DoS attacks-GoldenEye', 'DoS attacks-Hulk',
+                #                 'DoS attacks-SlowHTTPTest', 'DoS attacks-Slowloris',
+                #                 'FTP-BruteForce', 'Infilteration', 'SQL Injection',
+                #                 'SSH-Bruteforce'] # UNSW-NB15 types
+                attack_types = ['Benign', 'FTP-BruteForce', 'SSH-Bruteforce',
+                                'DoS_attacks-GoldenEye', 'DoS_attacks-Slowloris',
+                                'DoS_attacks-SlowHTTPTest', 'DoS_attacks-Hulk',
+                                'DDoS_attacks-LOIC-HTTP', 'DDOS_attack-LOIC-UDP',
+                                'DDOS_attack-HOIC', 'Brute_Force_-Web', 'Brute_Force_-XSS',
+                                'SQL_Injection', 'Infilteration', 'Bot'] # CIC-IDS2017 types
+                classification = attack_types[int(pred)] if int(pred) < len(attack_types) else 'Unknown'
+
+                # Create probability breakdown for all attack types
+                all_probabilities = {}
+                for idx, attack_type in enumerate(attack_types):
+                    if idx < len(proba):
+                        all_probabilities[attack_type] = round(float(proba[idx]), ROUND_PROBABILITY_DIGITS)
+                
+                # Sort by probability (descending)
+                sorted_probs = sorted(all_probabilities.items(), key=lambda x: x[1], reverse=True)
+                prob_str = ', '.join([f"{attack}: {prob*100:.1f}%" for attack, prob in sorted_probs])
+
+                results.append({
+                    'classification': classification,
+                    'probability': max_proba,
+                    'all_probabilities': all_probabilities,
+                    'probability_str': prob_str,
+                    'risk': risk
+                })
+
+            return results
+
+        except Exception as e:
+            traceback.print_exc()
+            return []
 
 
 def classify(flow_data, flow_obj=None):
@@ -724,12 +745,13 @@ def classify(flow_data, flow_obj=None):
     feature_string.append(str(features['L4_SRC_PORT']))
     feature_string.append(str(features['L4_DST_PORT']))
 
-    # Track source IP
+    # Track source IP (thread-safe)
     src_ip = features['IPV4_SRC_ADDR']
-    if src_ip in src_ip_dict:
-        src_ip_dict[src_ip] += 1
-    else:
-        src_ip_dict[src_ip] = 1
+    with src_ip_dict_lock:
+        if src_ip in src_ip_dict:
+            src_ip_dict[src_ip] += 1
+        else:
+            src_ip_dict[src_ip] = 1
 
     # Add to buffer for batch processing (with lock to prevent race conditions)
     with flow_buffer_lock:
@@ -738,7 +760,7 @@ def classify(flow_data, flow_obj=None):
 
         # Check if buffer is full
         if len(flow_buffer) < CLASSIFY_BATCH_SIZE:
-            return feature_string + ['Pending...', 0.0, 'Processing']
+            return # Not enough flows yet
         
         # Buffer is full: make local copy and clear while holding lock
         batch_to_process = flow_buffer[:]
@@ -757,8 +779,11 @@ def classify(flow_data, flow_obj=None):
 
             # Emit model-based results
             for idx in range(num_flows_to_process):
-                flow_count += 1  # Increment only when we have a valid result
-                current_flow_id = flow_count
+                # Thread-safe flow_count increment
+                with flow_count_lock:
+                    flow_count += 1
+                    current_flow_id = flow_count
+                
                 flow_features = batch_to_process[idx]
                 flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
                 result = results[idx]
@@ -780,9 +805,10 @@ def classify(flow_data, flow_obj=None):
                 # Predict anomaly for this flow before creating record
                 anomaly_pred = predict_anomaly(flow_features)
                 if anomaly_pred is not None:
-                    anomaly_predictions[current_flow_id] = anomaly_pred
+                    with anomaly_predictions_lock:
+                        anomaly_predictions[current_flow_id] = anomaly_pred
                 else:
-                    anomaly_pred = 'N/A'
+                    anomaly_pred = 'Unknown'
                 
                 record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
                     flow_features['IPV4_SRC_ADDR'],
@@ -800,14 +826,16 @@ def classify(flow_data, flow_obj=None):
                     anomaly_pred
                 ]
 
-                flow_df.loc[len(flow_df)] = record
+                # Thread-safe flow_df update
+                with flow_df_lock:
+                    flow_df.loc[len(flow_df)] = record
+                    
+                    # Memory optimization: Keep only recent flows
+                    if len(flow_df) > MAX_FLOW_HISTORY:
+                        flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
 
                 # Persist to CSV (if enabled)
                 _append_flow_row(record)
-                
-                # Memory optimization: Keep only recent flows
-                if len(flow_df) > MAX_FLOW_HISTORY:
-                    flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
 
                 # Log
                 output_log.writerow([f'Flow #{current_flow_id}'])
@@ -816,8 +844,9 @@ def classify(flow_data, flow_obj=None):
                 output_log.writerow(
                     ['--------------------------------------------------------------------------------------------------'])
 
-                # Emit to frontend
-                ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
+                # Emit to frontend (thread-safe src_ip_dict access)
+                with src_ip_dict_lock:
+                    ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
 
                 # Format display data to match table columns:
@@ -833,6 +862,10 @@ def classify(flow_data, flow_obj=None):
                 flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
                 # anomaly_pred already calculated and stored in record
 
+                # Normalize anomaly value before emitting
+                if pd.isna(anomaly_pred) or anomaly_pred is None or anomaly_pred == '' or anomaly_pred == 'nan':
+                    anomaly_pred = 'Unknown'
+
                 display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
                                 protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display_data,
@@ -844,8 +877,10 @@ def classify(flow_data, flow_obj=None):
         else:
             # Fallback: emit placeholder rows so UI is not empty
             for idx, flow_features in enumerate(batch_to_process):
-                flow_count += 1  # Increment only when actually creating a flow
-                current_flow_id = flow_count
+                # Thread-safe flow_count increment
+                with flow_count_lock:
+                    flow_count += 1
+                    current_flow_id = flow_count
                 flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
                 classification = 'Pending'
                 label = 1  # Treat pending as potentially malicious
@@ -858,9 +893,10 @@ def classify(flow_data, flow_obj=None):
                 # Predict anomaly for placeholder flow
                 anomaly_pred = predict_anomaly(flow_features)
                 if anomaly_pred is not None:
-                    anomaly_predictions[current_flow_id] = anomaly_pred
+                    with anomaly_predictions_lock:
+                        anomaly_predictions[current_flow_id] = anomaly_pred
                 else:
-                    anomaly_pred = 'N/A'
+                    anomaly_pred = 'Unknown'
                 record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
                     flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'),
                     flow_features.get('L4_SRC_PORT', '0'),
@@ -876,12 +912,21 @@ def classify(flow_data, flow_obj=None):
                     end_time,
                     anomaly_pred
                 ]
-                flow_df.loc[len(flow_df)] = record
+                
+                # Thread-safe flow_df update
+                with flow_df_lock:
+                    flow_df.loc[len(flow_df)] = record
+
+                    # Memory optimization: Keep only recent flows
+                    if len(flow_df) > MAX_FLOW_HISTORY:
+                        flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
 
                 # Persist placeholder to CSV (if enabled)
                 _append_flow_row(record)
 
-                ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
+                # Thread-safe src_ip_dict access
+                with src_ip_dict_lock:
+                    ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
                 ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
 
                 # Format display data to match table columns:
@@ -896,6 +941,10 @@ def classify(flow_data, flow_obj=None):
                 app_name_display = app_name
                 # anomaly_pred already calculated and stored in record
 
+                # Normalize anomaly value before emitting
+                if pd.isna(anomaly_pred) or anomaly_pred is None or anomaly_pred == '' or anomaly_pred == 'nan':
+                    anomaly_pred = 'Unknown'
+
                 display = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport, protocol,
                            start_time, end_time, flow_duration, app_name_display, anomaly_pred, classification, proba_score, risk]
                 socketio.emit('newresult', {'result': display,
@@ -904,8 +953,6 @@ def classify(flow_data, flow_obj=None):
                               "prob_str": "",
                               "flow_id": current_flow_id,
                               "anomaly_pred": anomaly_pred}, namespace='/test')
-
-    return feature_string + ['Pending...', 0.0, 'Processing']
 
 
 # ---- Pagination and history helpers ----
@@ -917,7 +964,8 @@ def get_flows_dataframe() -> pd.DataFrame:
     try:
         # Use in-memory DataFrame (has latest rows)
         if flows_csv_writer is not None:
-            return flow_df.copy()
+            with flow_df_lock:
+                return flow_df.copy()
         # Fall back to reading default CSV on disk if present
         import os
         default_path = os.path.join(os.getcwd(), flows_csv_file.name)
@@ -926,7 +974,8 @@ def get_flows_dataframe() -> pd.DataFrame:
     except Exception:
         pass
     # Default to current in-memory DataFrame
-    return flow_df.copy()
+    with flow_df_lock:
+        return flow_df.copy()
 
 
 def update_flow_in_csv(flow_id, record):
@@ -970,14 +1019,26 @@ def update_flow_in_csv(flow_id, record):
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
                 print(f"[CSV] Created new flow {flow_id_int} in {csv_path}")
 
-            # Write back to CSV and flush to disk while holding the lock
+            # Write back to CSV while holding the lock
+            # Close the current file handle before df.to_csv overwrites
+            if flows_csv_file and not flows_csv_file.closed:
+                flows_csv_file.close()
+                flows_csv_writer = None
+            
             df.to_csv(
                 csv_path,
                 index=False,
                 quoting=csv.QUOTE_ALL,
                 lineterminator='\n'
             )
-            flows_csv_file.flush()
+            
+            # Reopen file in append mode for future writes
+            flows_csv_file = open(csv_path, 'a', newline='')
+            flows_csv_writer = csv.writer(
+                flows_csv_file,
+                quoting=csv.QUOTE_ALL,
+                lineterminator='\n'
+            )
         
     except Exception as e:
         print(f"[CSV] Error updating flow {flow_id}: {e}")
@@ -1025,7 +1086,7 @@ def api_load_model():
 @app.route('/api/upload-anomaly-flows', methods=['POST'])
 def api_upload_anomaly_flows():
     """Upload flows CSV file and train Anomaly Model for anomaly detection on new flows"""
-    global dgi_anomaly_flows, anomaly_predictions, anomaly_flows_file, anomaly_model, anomaly_scaler, dgi_anomaly_model
+    global dgi_anomaly_flows, anomaly_predictions, anomaly_flows_file, anomaly_model, anomaly_scaler, dgi_anomaly_model, anomaly_algorithm
     global anomaly_model_fitted, anomaly_feature_order, anomaly_cols_to_norm_trained
     
     try:
@@ -1043,6 +1104,7 @@ def api_upload_anomaly_flows():
         max_flows = int(request.form.get('max_flows', 100000))
         n_estimators = int(request.form.get('n_estimators', 50))
         contamination = float(request.form.get('contamination', 0.01))
+        algorithm = request.form.get('algorithm', 'IF').strip().upper()
         
         # Check if DGI anomaly model is loaded
         if dgi_anomaly_model is None:
@@ -1156,19 +1218,28 @@ def api_upload_anomaly_flows():
             print(f"[Anomaly Detection] Warning: Still found inf values after cleaning")
         
         # Train Anomaly Model on fused features
-        print(f"[Anomaly Detection] Training with N={n_estimators}, contamination={contamination}")
-        # anomaly_model = CBLOF(n_clusters=n_estimators, contamination=contamination, random_state=42)
-        anomaly_model = IsolationForest(n_estimators=n_estimators, contamination=contamination, random_state=42)
+        algo_map = {
+            'IF': ('IsolationForest', lambda: IsolationForest(n_estimators=n_estimators, contamination=contamination, random_state=42)),
+            'CBLOF': ('CBLOF', lambda: CBLOF(n_clusters=n_estimators, contamination=contamination, random_state=42)),
+            'HBOS': ('HBOS', lambda: HBOS(contamination=contamination)),
+            'PCA': ('PCA', lambda: PCA(contamination=contamination, n_components=min(n_estimators, df_fuse.shape[1])))
+        }
+        selected_algo_name, algo_ctor = algo_map.get(algorithm, algo_map['IF'])
+        anomaly_algorithm = selected_algo_name
+        print(f"[Anomaly Detection] Training {selected_algo_name} with N={n_estimators}, contamination={contamination}")
+        anomaly_model = algo_ctor()
         anomaly_model.fit(df_fuse.to_numpy())
         
-        # Store DataFrame and metadata
-        dgi_anomaly_flows = df
-        anomaly_flows_file = filename
-        anomaly_predictions = {}  # Clear previous predictions
-        # Persist training metadata for consistent prediction preprocessing
-        anomaly_feature_order = netflow_features[:]
-        anomaly_cols_to_norm_trained = cols_to_normalize[:]
-        anomaly_model_fitted = True
+        # Store DataFrame and metadata (thread-safe)
+        with anomaly_data_lock:
+            global dgi_anomaly_flows, anomaly_flows_file, anomaly_predictions, anomaly_feature_order, anomaly_cols_to_norm_trained, anomaly_model_fitted
+            dgi_anomaly_flows = df
+            anomaly_flows_file = filename
+            anomaly_predictions = {}  # Clear previous predictions
+            # Persist training metadata for consistent prediction preprocessing
+            anomaly_feature_order = netflow_features[:]
+            anomaly_cols_to_norm_trained = cols_to_normalize[:]
+            anomaly_model_fitted = True
         
         print(f"[Anomaly Detection] Model trained on {len(df)} flows with fusion features. Ready to predict anomalies on new flows.")
         
@@ -1176,7 +1247,8 @@ def api_upload_anomaly_flows():
             'success': True,
             'filename': filename,
             'total_flows': len(df),
-            'message': f'Model trained on {len(df)} flows with DGI+fusion. Ready to detect anomalies.',
+            'algorithm': anomaly_algorithm,
+            'message': f'Model trained on {len(df)} flows with DGI+fusion using {anomaly_algorithm}. Ready to detect anomalies.',
             'predictions': {}  # Empty since we'll predict on new flows
         })
         
@@ -1216,7 +1288,13 @@ def api_flows():
         duration = row.get('FLOW_DURATION_MILLISECONDS', 0)
         app_name = row.get('App_Name', 'Unknown')
         # Get anomaly prediction from stored column (fallback to dictionary if not in column)
-        anomaly_pred = row.get('Anomaly', anomaly_predictions.get(flow_id, 'N/A'))
+        with anomaly_predictions_lock:
+            anomaly_pred = row.get('Anomaly', anomaly_predictions.get(flow_id, 'Unknown'))
+        
+        # Normalize anomaly value to handle NaN, None, or empty values
+        if pd.isna(anomaly_pred) or anomaly_pred is None or anomaly_pred == '' or anomaly_pred == 'nan':
+            anomaly_pred = 'Unknown'
+        
         display = [
             flow_id,
             str(row.get('IPV4_SRC_ADDR', '0.0.0.0')),
@@ -1234,8 +1312,15 @@ def api_flows():
             row.get('Risk', 'Processing')
         ]
         data.append(display)
-        if anomaly_pred != 'N/A':
+        if anomaly_pred != 'Unknown':
             predictions[flow_id] = anomaly_pred
+
+    # Get anomaly model status safely
+    with anomaly_data_lock:
+        model_loaded = anomaly_model_fitted
+        model_filename = anomaly_flows_file if anomaly_model_fitted else None
+        model_flows_count = len(dgi_anomaly_flows) if anomaly_model_fitted and dgi_anomaly_flows is not None else 0
+        model_algorithm = anomaly_algorithm if anomaly_model_fitted else None
 
     return jsonify({
         'page': 1,
@@ -1246,9 +1331,10 @@ def api_flows():
         'data': data,
         'anomaly_predictions': predictions,
         'anomaly_model_status': {
-            'loaded': anomaly_model_fitted,
-            'filename': anomaly_flows_file if anomaly_model_fitted else None,
-            'total_flows': len(dgi_anomaly_flows) if anomaly_model_fitted and dgi_anomaly_flows is not None else 0
+            'loaded': model_loaded,
+            'filename': model_filename,
+            'total_flows': model_flows_count,
+            'algorithm': model_algorithm
         }
     })
 
@@ -1360,16 +1446,27 @@ def snif_and_detect():
             filter=capture_bpf_filter if capture_bpf_filter else DEFAULT_BPF_FILTER
         )
 
-        # Process remaining flows
-        for flow_key, flow in list(current_flows.items()):
+        # Process remaining flows (thread-safe snapshot)
+        with current_flows_lock:
+            flows_snapshot = list(current_flows.items())
+        
+        for flow_key, flow in flows_snapshot:
             flow_data = flow.get_data()
             classify(flow_data, flow)  # Pass Flow object
 
-        # Process any remaining flows in buffer
-        if len(flow_buffer) > 0:
-            process_flow_batch(flow_buffer)
-            flow_buffer.clear()
-            flow_objects_buffer.clear()
+        # Process any remaining flows in buffer (thread-safe)
+        with flow_buffer_lock:
+            if len(flow_buffer) > 0:
+                remaining_batch = flow_buffer[:]
+                remaining_objects = flow_objects_buffer[:]
+                flow_buffer.clear()
+                flow_objects_buffer.clear()
+            else:
+                remaining_batch = []
+                remaining_objects = []
+        
+        if len(remaining_batch) > 0:
+            process_flow_batch(remaining_batch)
 
 
 def garbage_collect_inactive_flows(scan_interval_seconds: int = GC_SCAN_INTERVAL):
@@ -1443,9 +1540,10 @@ def flow_detail():
             if 'FlowID' in df.columns and flow_id in df['FlowID'].values:
                 flow = df.loc[df['FlowID'] == flow_id]
 
-        # Fallback to in-memory dataframe if CSV miss
+        # Fallback to in-memory dataframe if CSV miss (thread-safe)
         if flow is None or len(flow) == 0:
-            mem_df = flow_df.copy()
+            with flow_df_lock:
+                mem_df = flow_df.copy()
             if 'FlowID' in mem_df.columns and flow_id in mem_df['FlowID'].values:
                 flow = mem_df.loc[mem_df['FlowID'] == flow_id]
 
@@ -1461,6 +1559,18 @@ def flow_detail():
     classification = flow['Attack'].values[0] if 'Attack' in flow.columns else 'Unknown'
     risk = flow['Risk'].values[0] if 'Risk' in flow.columns else 'Unknown'
     probability = flow['Probability'].values[0] if 'Probability' in flow.columns else 0.0
+    anomaly_val = flow['Anomaly'].values[0] if 'Anomaly' in flow.columns else None
+
+    # Normalize anomaly display value
+    anomaly_label = "Unknown"
+    if anomaly_val is not None and not pd.isna(anomaly_val):
+        try:
+            anomaly_int = int(anomaly_val)
+            anomaly_label = "Anomaly" if anomaly_int == 1 else "Normal"
+        except Exception:
+            anomaly_label = str(anomaly_val)
+    # anomaly_display = f"Anomaly Result: {anomaly_label}"
+    anomaly_display = anomaly_label
     
     # Get all probabilities
     all_probs_json = flow['All_Probabilities'].values[0] if 'All_Probabilities' in flow.columns else '{}'
@@ -1502,6 +1612,7 @@ def flow_detail():
         exp=f"<h3>Attack: {classification}</h3><p>Probability: {probability:.4f}</p>",
         ae_plot=plot_div,
         risk=f"Risk: {risk}",
+        anomaly_result=anomaly_display,
         all_probs_table=prob_html
     )
 
@@ -1533,15 +1644,16 @@ def test_disconnect():
 def handle_re_evaluation(data):
     """Re-evaluate a specific flow by its ID"""
     global flow_df
-
+    
     flow_id = data.get('flow_id')
     print(f'Re-evaluating flow {flow_id}')
 
     if flow_id is None:
         return
 
-    # Find the flow in the dataframe
-    flow_records = flow_df[flow_df['FlowID'] == int(flow_id)]
+    # Find the flow in the dataframe (thread-safe)
+    with flow_df_lock:
+        flow_records = flow_df[flow_df['FlowID'] == int(flow_id)].copy()
 
     if len(flow_records) == 0:
         print(f'Flow {flow_id} not found')
@@ -1571,19 +1683,22 @@ def handle_re_evaluation(data):
         # Predict anomaly for re-evaluated flow
         anomaly_pred = predict_anomaly(features)
         if anomaly_pred is not None:
-            anomaly_predictions[int(flow_id)] = anomaly_pred
+            with anomaly_predictions_lock:
+                anomaly_predictions[int(flow_id)] = anomaly_pred
         else:
-            anomaly_pred = 'N/A'
+            anomaly_pred = 'Unknown'
 
-        # Update the dataframe
+        # Update the dataframe (thread-safe)
         label = 0 if classification == 'Benign' else 1
-        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Attack'] = classification
-        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Label'] = label
-        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Probability'] = proba_score
-        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Risk'] = risk
-        flow_df.loc[flow_df['FlowID'] == int(flow_id), 'All_Probabilities'] = json.dumps(result.get('all_probabilities', {}))
+        with flow_df_lock:
+            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Attack'] = classification
+            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Label'] = label
+            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Probability'] = proba_score
+            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Risk'] = risk
+            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'All_Probabilities'] = json.dumps(result.get('all_probabilities', {}))
 
-        # Create record for CSV update
+            # Create record for CSV update
+            flow_record = flow_df[flow_df['FlowID'] == int(flow_id)].iloc[0].copy()
         flow_record = flow_df[flow_df['FlowID'] == int(flow_id)].iloc[0]
         record = [int(flow_id)] + [flow_record.get(f, 0) for f in netflow_features] + [
             flow_record.get('IPV4_SRC_ADDR', '0.0.0.0'),
@@ -1594,7 +1709,11 @@ def handle_re_evaluation(data):
             label,
             proba_score,
             risk,
-            json.dumps(result.get('all_probabilities', {}))
+            json.dumps(result.get('all_probabilities', {})),
+            flow_record.get('App_Name', 'Unknown'),
+            flow_record.get('Start_Time', 'N/A'),
+            flow_record.get('End_Time', 'N/A'),
+            anomaly_pred
         ]
         
         # Update CSV file with the new result
@@ -1670,4 +1789,5 @@ _ensure_flows_csv()
 if __name__ == '__main__':
     # Ensure background workers are started even if no client connects yet
     start_background_workers()
-    socketio.run(app)
+    # Enable hot-reload: use_reloader reloads code on changes, debug shows errors
+    socketio.run(app, debug=True, use_reloader=True)
