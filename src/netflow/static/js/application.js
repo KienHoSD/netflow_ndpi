@@ -413,7 +413,10 @@ $(document).ready(function(){
             anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
         }
 
-        // Trim messages if exceeding maxPageSize
+        // Always record the flow, even if not currently in live mode
+        messages_received.push(msg.result);
+        
+        // Trim immediately to prevent growth beyond maxPageSize
         if (messages_received.length > maxPageSize) {
             messages_received = messages_received.slice(-maxPageSize);
         }
