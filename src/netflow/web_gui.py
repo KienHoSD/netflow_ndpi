@@ -381,7 +381,7 @@ def get_available_models():
 
 def load_models(dgi_multiclass_model_name=None, multiclass_classify_model_name=None, dgi_anomaly_model_name=None):
     """Load specified models"""
-    global dgi_multiclass_model, multiclass_classify_model, dgi_anomaly_model, encoder, scaler, models_loaded
+    global dgi_multiclass_model, multiclass_classify_model, dgi_anomaly_model, models_loaded
     global current_dgi_multiclass_model_name, current_multiclass_classify_model_name, current_dgi_anomaly_model_name
     
     with model_lock:
@@ -427,9 +427,6 @@ def load_models(dgi_multiclass_model_name=None, multiclass_classify_model_name=N
                 current_dgi_anomaly_model_name = dgi_anomaly_model_name
                 print(f"Loaded DGI anomaly model: {dgi_anomaly_model_name}")
             
-            # Initialize encoder and scaler
-            encoder = ce.TargetEncoder(cols=categorical_cols)
-            scaler = Normalizer()
             models_loaded = True
             return True, "Models loaded successfully"
         
@@ -712,6 +709,105 @@ def process_flow_batch(flows_data):
             return []
 
 
+def _emit_flow_result(current_flow_id, flow_features, flow_object, result, batch_results_ip_data):
+    """Helper to emit a single flow result to frontend and update storage (thread-safe)
+    
+    Args:
+        current_flow_id: Flow ID counter
+        flow_features: Dictionary of flow features
+        flow_object: Flow object or None
+        result: Classification result dict or None (for fallback)
+        batch_results_ip_data: Pre-computed IP data JSON string
+    """
+    global flow_df, anomaly_predictions
+    
+    if result:
+        classification = result['classification']
+        proba_score = result['probability']
+        probability_str = result.get('probability_str', '')
+        risk = result['risk']
+        all_probs = result.get('all_probabilities', {})
+    else:
+        # Fallback values
+        classification = 'Pending'
+        proba_score = 0.0
+        probability_str = ''
+        risk = 'Processing'
+        all_probs = {}
+    
+    label = 0 if classification == 'Benign' else 1
+    
+    # Get app name and times (cached from flow_object attributes)
+    app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
+    start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
+    end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
+    
+    # Predict anomaly
+    anomaly_pred = predict_anomaly(flow_features)
+    if anomaly_pred is None:
+        anomaly_pred = 'Unknown'
+    elif pd.isna(anomaly_pred) or anomaly_pred == '' or anomaly_pred == 'nan':
+        anomaly_pred = 'Unknown'
+    
+    # Store anomaly prediction if valid
+    if anomaly_pred != 'Unknown':
+        with anomaly_predictions_lock:
+            anomaly_predictions[current_flow_id] = anomaly_pred
+    
+    # Create CSV record
+    record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
+        flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'),
+        flow_features.get('L4_SRC_PORT', '0'),
+        flow_features.get('IPV4_DST_ADDR', '0.0.0.0'),
+        flow_features.get('L4_DST_PORT', '0'),
+        classification,
+        label,
+        proba_score,
+        risk,
+        json.dumps(all_probs),
+        app_name,
+        start_time,
+        end_time,
+        anomaly_pred
+    ]
+    
+    # Thread-safe flow_df update
+    with flow_df_lock:
+        flow_df.loc[len(flow_df)] = record
+        if len(flow_df) > MAX_FLOW_HISTORY:
+            flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
+    
+    # Persist to CSV
+    _append_flow_row(record)
+    
+    # Log output
+    output_log.writerow([f'Flow #{current_flow_id}'])
+    output_log.writerow(['Attack:'] + [classification] + [proba_score])
+    output_log.writerow(['All Probabilities:'] + [probability_str])
+    output_log.writerow(['--------------------------------------------------------------------------------------------------'])
+    
+    # Format display data
+    disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
+    disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
+    disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
+    disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
+    protocol = flow_features.get('PROTOCOL', 0)
+    flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
+    
+    display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
+                    protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
+    
+    # Emit to frontend
+    socketio.emit('newresult', {
+        'result': display_data,
+        'ips': json.loads(batch_results_ip_data),
+        'all_probs': all_probs,
+        'prob_str': probability_str,
+        'flow_id': current_flow_id,
+        'anomaly_pred': anomaly_pred
+    }, namespace='/test')
+
+
 def classify(flow_data, flow_obj=None):
     """Classify a single flow
     
@@ -724,7 +820,7 @@ def classify(flow_data, flow_obj=None):
     # Extract features
     features = extract_flow_features(flow_data)
 
-    # Format IP addresses with country flags
+    # Format IP addresses with country flags (moved outside loop, only for display)
     feature_string = []
     for i, ip_key in enumerate(['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']):
         ip = features[ip_key]
@@ -772,6 +868,11 @@ def classify(flow_data, flow_obj=None):
         print(f"[DEBUG] Buffer full! Processing batch of {len(batch_to_process)} flows...")
         results = process_flow_batch(batch_to_process)
 
+        # Pre-compute IP data once for the batch
+        with src_ip_dict_lock:
+            ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
+        batch_results_ip_data = pd.DataFrame(ip_data).to_json(orient='records')
+
         if results and len(results) > 0:
             print(f"[DEBUG] Got {len(results)} results for {len(batch_to_process)} flows")
             # Process only flows we have results for
@@ -788,92 +889,7 @@ def classify(flow_data, flow_obj=None):
                 flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
                 result = results[idx]
 
-                classification = result['classification']
-                proba_score = result['probability']
-                probability_str = result.get('probability_str', '')
-                risk = result['risk']
-                
-                # Get app name from nDPI using Flow object (before creating record)
-                app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                # Get start and end times from Flow object
-                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
-                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
-
-                # Create record with app_name and times included
-                label = 0 if classification == 'Benign' else 1
-                
-                # Predict anomaly for this flow before creating record
-                anomaly_pred = predict_anomaly(flow_features)
-                if anomaly_pred is not None:
-                    with anomaly_predictions_lock:
-                        anomaly_predictions[current_flow_id] = anomaly_pred
-                else:
-                    anomaly_pred = 'Unknown'
-                
-                record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
-                    flow_features['IPV4_SRC_ADDR'],
-                    flow_features['L4_SRC_PORT'],
-                    flow_features['IPV4_DST_ADDR'],
-                    flow_features['L4_DST_PORT'],
-                    classification,
-                    label,
-                    proba_score,
-                    risk,
-                    json.dumps(result.get('all_probabilities', {})),
-                    app_name,
-                    start_time,
-                    end_time,
-                    anomaly_pred
-                ]
-
-                # Thread-safe flow_df update
-                with flow_df_lock:
-                    flow_df.loc[len(flow_df)] = record
-                    
-                    # Memory optimization: Keep only recent flows
-                    if len(flow_df) > MAX_FLOW_HISTORY:
-                        flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
-
-                # Persist to CSV (if enabled)
-                _append_flow_row(record)
-
-                # Log
-                output_log.writerow([f'Flow #{current_flow_id}'])
-                output_log.writerow(['Attack:'] + [classification] + [proba_score])
-                output_log.writerow(['All Probabilities:'] + [probability_str])
-                output_log.writerow(
-                    ['--------------------------------------------------------------------------------------------------'])
-
-                # Emit to frontend (thread-safe src_ip_dict access)
-                with src_ip_dict_lock:
-                    ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
-                ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
-
-                # Format display data to match table columns:
-                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Start, End, Flow duration, App name, Anomaly, Prediction, Prob, Risk
-                disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
-                disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
-                disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
-                disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
-                protocol = flow_features.get('PROTOCOL', 0)
-                # Get start and end times from Flow object
-                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
-                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
-                flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
-                # anomaly_pred already calculated and stored in record
-
-                # Normalize anomaly value before emitting
-                if pd.isna(anomaly_pred) or anomaly_pred is None or anomaly_pred == '' or anomaly_pred == 'nan':
-                    anomaly_pred = 'Unknown'
-
-                display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                                protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
-                socketio.emit('newresult', {'result': display_data,
-                              "ips": json.loads(ip_data_json),
-                              "all_probs": result.get('all_probabilities', {}),
-                              "prob_str": probability_str,
-                              "flow_id": current_flow_id,
-                              "anomaly_pred": anomaly_pred}, namespace='/test')
+                _emit_flow_result(current_flow_id, flow_features, flow_object, result, batch_results_ip_data)
         else:
             # Fallback: emit placeholder rows so UI is not empty
             for idx, flow_features in enumerate(batch_to_process):
@@ -881,78 +897,9 @@ def classify(flow_data, flow_obj=None):
                 with flow_count_lock:
                     flow_count += 1
                     current_flow_id = flow_count
-                flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
-                classification = 'Pending'
-                label = 1  # Treat pending as potentially malicious
-                proba_score = 0.0
-                risk = 'Processing'
-                # Get app name and times for placeholder
-                app_name = get_app_name_from_flow(flow_object) if flow_object else "Unknown"
-                start_time = format_timestamp_to_time(flow_object.start_timestamp) if flow_object and hasattr(flow_object, 'start_timestamp') else "N/A"
-                end_time = format_timestamp_to_time(flow_object.latest_timestamp) if flow_object and hasattr(flow_object, 'latest_timestamp') else "N/A"
-                # Predict anomaly for placeholder flow
-                anomaly_pred = predict_anomaly(flow_features)
-                if anomaly_pred is not None:
-                    with anomaly_predictions_lock:
-                        anomaly_predictions[current_flow_id] = anomaly_pred
-                else:
-                    anomaly_pred = 'Unknown'
-                record = [current_flow_id] + [flow_features.get(f, 0) for f in netflow_features] + [
-                    flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'),
-                    flow_features.get('L4_SRC_PORT', '0'),
-                    flow_features.get('IPV4_DST_ADDR', '0.0.0.0'),
-                    flow_features.get('L4_DST_PORT', '0'),
-                    classification,
-                    label,
-                    proba_score,
-                    risk,
-                    json.dumps({}),
-                    app_name,
-                    start_time,
-                    end_time,
-                    anomaly_pred
-                ]
                 
-                # Thread-safe flow_df update
-                with flow_df_lock:
-                    flow_df.loc[len(flow_df)] = record
-
-                    # Memory optimization: Keep only recent flows
-                    if len(flow_df) > MAX_FLOW_HISTORY:
-                        flow_df = flow_df.iloc[-MAX_FLOW_HISTORY:].reset_index(drop=True)
-
-                # Persist placeholder to CSV (if enabled)
-                _append_flow_row(record)
-
-                # Thread-safe src_ip_dict access
-                with src_ip_dict_lock:
-                    ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
-                ip_data_json = pd.DataFrame(ip_data).to_json(orient='records')
-
-                # Format display data to match table columns:
-                # Flow ID, Src IP, Src Port, Dst IP, Dst Port, Protocol, Start, End, Flow duration, App name, Anomaly, Prediction, Prob, Risk
-                disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
-                disp_dst = str(flow_features.get('IPV4_DST_ADDR', '0.0.0.0'))
-                disp_sport = str(flow_features.get('L4_SRC_PORT', '0'))
-                disp_dport = str(flow_features.get('L4_DST_PORT', '0'))
-                protocol = flow_features.get('PROTOCOL', 0)
-                flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
-                # Get app name from placeholder record
-                app_name_display = app_name
-                # anomaly_pred already calculated and stored in record
-
-                # Normalize anomaly value before emitting
-                if pd.isna(anomaly_pred) or anomaly_pred is None or anomaly_pred == '' or anomaly_pred == 'nan':
-                    anomaly_pred = 'Unknown'
-
-                display = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport, protocol,
-                           start_time, end_time, flow_duration, app_name_display, anomaly_pred, classification, proba_score, risk]
-                socketio.emit('newresult', {'result': display,
-                              "ips": json.loads(ip_data_json),
-                              "all_probs": {},  
-                              "prob_str": "",
-                              "flow_id": current_flow_id,
-                              "anomaly_pred": anomaly_pred}, namespace='/test')
+                flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
+                _emit_flow_result(current_flow_id, flow_features, flow_object, None, batch_results_ip_data)
 
 
 # ---- Pagination and history helpers ----
