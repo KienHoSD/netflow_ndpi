@@ -287,9 +287,9 @@ $(document).ready(function(){
     function loadPage(page) {
         liveMode = false;   
         localStorage.setItem('liveMode', 'false');
-        $.getJSON('/api/flows', { page_size: pageSize }, function(resp) {
+        $.getJSON('/api/flows', { page_size: Math.min(pageSize, maxPageSize) }, function(resp) {
             currentPage = 1; // API now returns latest flows only
-            messages_received = resp.data || [];
+            messages_received = (resp.data || []).slice(-maxPageSize); // Enforce limit
             // Load anomaly predictions from response
             if (resp.anomaly_predictions) {
                 for (var flowId in resp.anomaly_predictions) {
@@ -410,17 +410,14 @@ $(document).ready(function(){
             anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
         }
 
+        // Trim BEFORE adding if at limit to prevent exceeding maxPageSize
+        if (messages_received.length >= maxPageSize) {
+            var removed = messages_received.shift(); // Remove oldest
+            delete anomalyPredictions[removed[0]];
+        }
+
         // Always record the flow, even if not currently in live mode
         messages_received.push(msg.result);
-        
-        // Trim immediately to prevent growth beyond maxPageSize
-        if (messages_received.length > maxPageSize) {
-            var removed = messages_received.splice(0, messages_received.length - maxPageSize);
-            // Clean up old anomaly predictions to prevent memory leak
-            removed.forEach(function(flow) {
-                delete anomalyPredictions[flow[0]];
-            });
-        }
 
         // Only update UI if in live mode; otherwise keep data buffered
         if (!liveMode) {

@@ -1398,32 +1398,48 @@ def flow_detail():
     if flow_id == -1:
         return "Flow not found", 404
 
-    # Read from flows.csv file
+    flow = None
+    
     try:
-        # Try CSV first
-        if flows_csv_file is not None and hasattr(flows_csv_file, 'name'):
-            flows_csv_path = flows_csv_file.name
-        else:
-            flows_csv_path = DEFAULT_CSV_FILENAME
+        # FAST PATH: Check in-memory DataFrame first (most recent 500 flows)
+        with flow_df_lock:
+            mem_df = flow_df.copy()
+        
+        if 'FlowID' in mem_df.columns and flow_id in mem_df['FlowID'].values:
+            flow = mem_df.loc[mem_df['FlowID'] == flow_id]
+        
+        # SLOW PATH: Only read CSV if not in memory and ID seems reasonable
+        if (flow is None or len(flow) == 0) and flow_id > 0:
+            # Get current flow count to avoid reading CSV for impossible IDs
+            with flow_count_lock:
+                current_max_id = flow_count
+            
+            # Only search CSV if ID is potentially valid
+            if flow_id <= current_max_id:
+                if flows_csv_file is not None and hasattr(flows_csv_file, 'name'):
+                    flows_csv_path = flows_csv_file.name
+                else:
+                    flows_csv_path = DEFAULT_CSV_FILENAME
+                
+                if os.path.exists(flows_csv_path):
+                    # DIRECT LINE READ: FlowID N is at line N+1 (line 1 = header, line 2 = FlowID 1)
+                    # skiprows=flow_id means skip header + (flow_id-1) data rows
+                    with flows_csv_lock:
+                        try:
+                            df_single = pd.read_csv(flows_csv_path, engine='python', 
+                                                   on_bad_lines='skip', skiprows=flow_id, 
+                                                   nrows=1, header=None)
+                            if len(df_single) > 0:
+                                df_single.columns = cols  # Set column names manually
+                                flow = df_single
+                        except Exception:
+                            pass  # Flow not found or read error
 
-        flow = None
-        if os.path.exists(flows_csv_path):
-            df = _read_flows_csv_locked(flows_csv_path)
-            if 'FlowID' in df.columns and flow_id in df['FlowID'].values:
-                flow = df.loc[df['FlowID'] == flow_id]
-
-        # Fallback to in-memory dataframe if CSV miss (thread-safe)
         if flow is None or len(flow) == 0:
-            with flow_df_lock:
-                mem_df = flow_df.copy()
-            if 'FlowID' in mem_df.columns and flow_id in mem_df['FlowID'].values:
-                flow = mem_df.loc[mem_df['FlowID'] == flow_id]
-
-        if flow is None or len(flow) == 0:
-            print(f"[FLOW_DETAIL] Flow {flow_id} not found in {flows_csv_path}")
             return "Flow not found", 404
+            
     except Exception as e:
-        print(f"[FLOW_DETAIL] Error reading flows.csv: {e}")
+        print(f"[FLOW_DETAIL] Error: {e}")
         traceback.print_exc()
         return "Error loading flow data", 500
 
