@@ -979,70 +979,14 @@ def get_flows_dataframe() -> pd.DataFrame:
 
 
 def update_flow_in_csv(flow_id, record):
-    """Update or create a flow record in the CSV file"""
-    global flows_csv_file, flows_csv_writer
+    """Append flow to CSV (no updates, no loading entire file)
     
-    try:
-        _ensure_flows_csv()
-        if flows_csv_file is None:
-            return
-
-        csv_path = flows_csv_file.name
-        with flows_csv_lock:
-            # Read existing CSV under the lock
-            if os.path.exists(csv_path):
-                df = pd.read_csv(csv_path, engine='python', on_bad_lines='skip')
-            else:
-                df = pd.DataFrame(columns=cols)
-
-            # Ensure FlowID column is numeric for proper comparison
-            if len(df) > 0 and 'FlowID' in df.columns:
-                df['FlowID'] = pd.to_numeric(df['FlowID'], errors='coerce')
-                # Drop rows with invalid FlowIDs (NaN) instead of converting to 0
-                df = df.dropna(subset=['FlowID'])
-                df['FlowID'] = df['FlowID'].astype(int)
-
-            # Find and update or append the row (ensure flow_id is int)
-            flow_id_int = int(flow_id)
-            matching_rows = df[df['FlowID'] == flow_id_int]
-            
-            if len(matching_rows) > 0:
-                # Update existing row
-                idx = matching_rows.index[0]
-                for i, col in enumerate(cols):
-                    if i < len(record):
-                        df.at[idx, col] = record[i]
-                print(f"[CSV] Updated existing flow {flow_id_int} in {csv_path}")
-            else:
-                # Append new row
-                new_row = {cols[i]: record[i] if i < len(record) else None for i in range(len(cols))}
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                print(f"[CSV] Created new flow {flow_id_int} in {csv_path}")
-
-            # Write back to CSV while holding the lock
-            # Close the current file handle before df.to_csv overwrites
-            if flows_csv_file and not flows_csv_file.closed:
-                flows_csv_file.close()
-                flows_csv_writer = None
-            
-            df.to_csv(
-                csv_path,
-                index=False,
-                quoting=csv.QUOTE_ALL,
-                lineterminator='\n'
-            )
-            
-            # Reopen file in append mode for future writes
-            flows_csv_file = open(csv_path, 'a', newline='')
-            flows_csv_writer = csv.writer(
-                flows_csv_file,
-                quoting=csv.QUOTE_ALL,
-                lineterminator='\n'
-            )
-        
-    except Exception as e:
-        print(f"[CSV] Error updating flow {flow_id}: {e}")
-        traceback.print_exc()
+    Since re-evaluation is removed, this now just appends.
+    Old flows remain as historical record.
+    """
+    # Simply append - no memory issues, no loading CSV
+    _append_flow_row(record)
+    print(f"[CSV] Appended flow {flow_id} to CSV")
 
 @app.route('/api/models')
 def api_models():
@@ -1640,102 +1584,7 @@ def test_disconnect():
     print('Client disconnected')
 
 
-@socketio.on('re_evaluate_flow', namespace='/test')
-def handle_re_evaluation(data):
-    """Re-evaluate a specific flow by its ID"""
-    global flow_df
-    
-    flow_id = data.get('flow_id')
-    print(f'Re-evaluating flow {flow_id}')
-
-    if flow_id is None:
-        return
-
-    # Find the flow in the dataframe (thread-safe)
-    with flow_df_lock:
-        flow_records = flow_df[flow_df['FlowID'] == int(flow_id)].copy()
-
-    if len(flow_records) == 0:
-        print(f'Flow {flow_id} not found')
-        return
-
-    flow_record = flow_records.iloc[0]
-
-    # Extract features for re-evaluation
-    features = {}
-    for feat in netflow_features:
-        features[feat] = flow_record.get(feat, 0)
-
-    features['IPV4_SRC_ADDR'] = str(flow_record.get('IPV4_SRC_ADDR', '0.0.0.0'))
-    features['IPV4_DST_ADDR'] = str(flow_record.get('IPV4_DST_ADDR', '0.0.0.0'))
-    features['L4_SRC_PORT'] = flow_record.get('L4_SRC_PORT', 0)
-    features['L4_DST_PORT'] = flow_record.get('L4_DST_PORT', 0)
-
-    # Process single flow
-    results = process_flow_batch([features])
-
-    if results and len(results) > 0:
-        result = results[0]
-        classification = result['classification']
-        proba_score = result['probability']
-        risk = result['risk']
-
-        # Predict anomaly for re-evaluated flow
-        anomaly_pred = predict_anomaly(features)
-        if anomaly_pred is not None:
-            with anomaly_predictions_lock:
-                anomaly_predictions[int(flow_id)] = anomaly_pred
-        else:
-            anomaly_pred = 'Unknown'
-
-        # Update the dataframe (thread-safe)
-        label = 0 if classification == 'Benign' else 1
-        with flow_df_lock:
-            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Attack'] = classification
-            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Label'] = label
-            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Probability'] = proba_score
-            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'Risk'] = risk
-            flow_df.loc[flow_df['FlowID'] == int(flow_id), 'All_Probabilities'] = json.dumps(result.get('all_probabilities', {}))
-
-            # Create record for CSV update
-            flow_record = flow_df[flow_df['FlowID'] == int(flow_id)].iloc[0].copy()
-        flow_record = flow_df[flow_df['FlowID'] == int(flow_id)].iloc[0]
-        record = [int(flow_id)] + [flow_record.get(f, 0) for f in netflow_features] + [
-            flow_record.get('IPV4_SRC_ADDR', '0.0.0.0'),
-            flow_record.get('L4_SRC_PORT', 0),
-            flow_record.get('IPV4_DST_ADDR', '0.0.0.0'),
-            flow_record.get('L4_DST_PORT', 0),
-            classification,
-            label,
-            proba_score,
-            risk,
-            json.dumps(result.get('all_probabilities', {})),
-            flow_record.get('App_Name', 'Unknown'),
-            flow_record.get('Start_Time', 'N/A'),
-            flow_record.get('End_Time', 'N/A'),
-            anomaly_pred
-        ]
-        
-        # Update CSV file with the new result
-        update_flow_in_csv(int(flow_id), record)
-
-        # Log the re-evaluation
-        output_log.writerow([f'Re-evaluated Flow #{flow_id}'])
-        output_log.writerow(['Attack:'] + [classification] + [proba_score])
-        output_log.writerow(['--------------------------------------------------------------------------------------------------'])
-
-        # Emit result back to client
-        emit('re_evaluation_result', {
-            'flow_id': flow_id,
-            'classification': classification,
-            'probability': proba_score,
-            'risk': risk,
-            'anomaly_pred': anomaly_pred
-        }, namespace='/test')
-
-        print(f'Flow {flow_id} re-evaluated: {classification} ({proba_score:.4f}), Anomaly: {anomaly_pred}')
-    else:
-        print(f'Failed to re-evaluate flow {flow_id}')
+# Re-evaluation feature removed - causes inconsistent results due to per-batch normalization
 
 
 def set_capture_interface(iface=None):

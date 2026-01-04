@@ -27,7 +27,6 @@
     <p>By DanhLe, KienHo</p>
     <div style="text-align: center; margin-top: 20px;">
       <button class="btn btn-primary" onclick="goBack()">Back to Flows</button>
-      <button class="btn btn-warning" id="re-eval-btn" style="margin-left: 10px;">Re-evaluate Flow</button>
     </div>
   </div>
 </div>
@@ -54,21 +53,6 @@
 function goBack() {
   window.history.back();
 }
-
-// Get flow ID from URL
-var flowId = new URLSearchParams(window.location.search).get('flow_id');
-
-document.getElementById('re-eval-btn').addEventListener('click', function() {
-  // Connect to socket and emit re-evaluation
-  var socket = io(window.location.protocol + '//' + document.domain + ':' + location.port + '/test');
-  socket.on('connect', function() {
-    socket.emit('re_evaluate_flow', {flow_id: parseInt(flowId)});
-    alert('Re-evaluation queued. Results will update when complete.');
-    setTimeout(function() {
-      location.reload();
-    }, 2000);
-  });
-});
 </script>
 
 {% if exp %}

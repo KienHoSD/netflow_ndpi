@@ -279,7 +279,7 @@ $(document).ready(function(){
                 }
             }
             messages_string += '<td> <a href="/flow-detail?flow_id=' + arr[i][0].toString() + '"><div>Detail</div></a></td>';
-            messages_string += '<td><button class="btn btn-sm btn-primary re-evaluate-btn" data-flow-id="' + arr[i][0].toString() + '">Re-evaluate</button></td>' + '</tr>';
+            messages_string += '</tr>';
         }
         $('#details').html(messages_string);
     }
@@ -427,39 +427,6 @@ $(document).ready(function(){
         rebuildTableFromArray(messages_received);
         if (stickToBottom) scrollToBottom(logContainer);
         scheduleChartUpdate(msg.ips);
-    });
-
-    // Handle re-evaluation button clicks
-    $(document).on('click', '.re-evaluate-btn', function() {
-        var flowId = $(this).data('flow-id');
-        // console.log('Re-evaluating flow: ' + flowId);
-        socket.emit('re_evaluate_flow', {flow_id: flowId});
-    });
-
-    // Handle re-evaluation results
-    socket.on('re_evaluation_result', function(msg) {
-        // console.log("Received re-evaluation result for flow " + msg.flow_id);
-        
-        // Store anomaly prediction if provided
-        if (msg.anomaly_pred !== undefined) {
-            anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
-        }
-        
-        // Find and update the flow in messages_received
-        for (var i = 0; i < messages_received.length; i++) {
-            if (messages_received[i][0] == msg.flow_id) {
-                if (msg.anomaly_pred !== undefined) {
-                    messages_received[i][10] = msg.anomaly_pred;
-                }
-                messages_received[i][11] = msg.classification;
-                messages_received[i][12] = msg.probability;
-                messages_received[i][13] = msg.risk;
-                break;
-            }
-        }
-        
-        // Rebuild the table
-        rebuildTableFromArray(messages_received);
     });
 
     // Handle flow detail navigation

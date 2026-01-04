@@ -69,8 +69,7 @@
     <ul>
       <li>View flow predictions and probabilities in the table</li>
       <li>Check the "Anomaly" column to see normal/anomalous classification</li>
-      <li>Click "Detail" to see full flow information</li>
-      <li>Click "Re-evaluate" to reclassify a flow with the current models</li>
+      <li>Click "Detail" to see full flow information and visualizations</li>
     </ul>
     
     <button id="toggle-help-close-btn" class="btn btn-default" style="margin-top: 10px;">Close</button>
@@ -128,7 +127,7 @@
                 </div>
                 <div class="col-md-2">
                     <label for="n-estimators-input">N:</label>
-                    <input type="number" id="n-estimators-input" class="form-control" value="10" min="1">
+                    <input type="number" id="n-estimators-input" class="form-control" value="50" min="1">
                 </div>
                 <div class="col-md-2">
                     <label for="contamination-input">Contamination:</label>
