@@ -405,9 +405,6 @@ $(document).ready(function(){
 
     //receive details from server
     socket.on('newresult', function(msg) {
-        // Always record the flow, even if not currently in live mode
-        messages_received.push(msg.result);
-        
         // Store anomaly prediction if provided
         if (msg.anomaly_pred !== undefined && msg.flow_id !== undefined) {
             anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
@@ -418,7 +415,11 @@ $(document).ready(function(){
         
         // Trim immediately to prevent growth beyond maxPageSize
         if (messages_received.length > maxPageSize) {
-            messages_received = messages_received.slice(-maxPageSize);
+            var removed = messages_received.splice(0, messages_received.length - maxPageSize);
+            // Clean up old anomaly predictions to prevent memory leak
+            removed.forEach(function(flow) {
+                delete anomalyPredictions[flow[0]];
+            });
         }
 
         // Only update UI if in live mode; otherwise keep data buffered

@@ -248,7 +248,7 @@ MAX_FLOW_HISTORY = 500  # Keep only recent flows to limit memory
 MAX_ACTIVE_FLOWS = 200  # Limit concurrent flows (older flows get removed, can not be reclassified)
 GC_SCAN_INTERVAL = 10  # Interval to scan for inactive flows in seconds
 GC_FLOW_TIMEOUT = 120  # Flow timeout in seconds - faster cleanup for short-lived flows like curl
-CLEANUP_BATCH_SIZE = 40  # Number of flows to cleanup when exceeding MAX_ACTIVE_FLOWS (Need to be smaller than MAX_ACTIVE_FLOWS)
+CLEANUP_BATCH_SIZE = 80  # Number of flows to cleanup when exceeding MAX_ACTIVE_FLOWS (Need to be smaller than MAX_ACTIVE_FLOWS)
 CLASSIFY_BATCH_SIZE = 20  # Emit immediately for fastest UI updates
 ROUND_PROBABILITY_DIGITS = 4  # Number of decimal places to round probabilities
 
