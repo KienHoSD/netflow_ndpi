@@ -27,6 +27,13 @@
     <p>By DanhLe, KienHo</p>
     <div style="text-align: center; margin-top: 20px;">
       <button class="btn btn-primary" onclick="goBack()">Back to Flows</button>
+      <button class="btn btn-info" id="prevBtn" onclick="navigateFlow(-1)" style="margin-left: 10px;">← Previous Flow</button>
+      <button class="btn btn-info" id="nextBtn" onclick="navigateFlow(1)" style="margin-left: 10px;">Next Flow →</button>
+      <span id="flowNav" style="margin-left: 20px; font-size: 16px; font-weight: bold;"></span>
+      <div style="margin-top: 15px;">
+        <input type="text" id="flowIdInput" placeholder="Enter Flow ID" class="form-control" style="width: 150px; display: inline-block; margin-right: 10px;">
+        <button class="btn btn-warning" onclick="goToFlow()">Go to Flow</button>
+      </div>
     </div>
   </div>
 </div>
@@ -51,8 +58,46 @@
 
 <script>
 function goBack() {
-  window.history.back();
+  // go back to the main flows page
+  window.location.href = '/';
 }
+
+function getFlowIdFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return parseInt(params.get('flow_id')) || -1;
+}
+
+function navigateFlow(direction) {
+  const currentFlowId = getFlowIdFromUrl();
+  const nextFlowId = currentFlowId + direction;
+  
+  if (nextFlowId > 0) {
+    window.location.href = '/flow-detail?flow_id=' + nextFlowId;
+  }
+}
+
+function goToFlow() {
+  const flowId = document.getElementById('flowIdInput').value.trim();
+  if (flowId && !isNaN(flowId) && parseInt(flowId) > 0) {
+    window.location.href = '/flow-detail?flow_id=' + parseInt(flowId);
+  } else {
+    alert('Please enter a valid Flow ID (must be a positive number)');
+  }
+}
+
+function initFlowNav() {
+  const flowId = getFlowIdFromUrl();
+  document.getElementById('flowNav').textContent = 'Flow ID: ' + flowId;
+  document.getElementById('flowIdInput').value = flowId;  // Pre-fill with current flow ID
+  
+  // Disable previous button if at FlowID 1
+  if (flowId <= 1) {
+    document.getElementById('prevBtn').disabled = true;
+  }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', initFlowNav);
 </script>
 
 {% if exp %}
