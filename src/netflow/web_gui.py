@@ -249,7 +249,7 @@ MAX_ACTIVE_FLOWS = 200  # Limit concurrent flows (older flows get removed, can n
 GC_SCAN_INTERVAL = 5  # Interval to scan for inactive flows in seconds
 GC_FLOW_TIMEOUT = 120  # Flow timeout in seconds - faster cleanup for short-lived flows like curl
 CLEANUP_BATCH_SIZE = 40  # Number of flows to cleanup when exceeding MAX_ACTIVE_FLOWS (Need to be smaller than MAX_ACTIVE_FLOWS)
-CLASSIFY_BATCH_SIZE = 15  # Emit immediately for fastest UI updates
+CLASSIFY_BATCH_SIZE = 20  # Emit immediately for fastest UI updates
 ROUND_PROBABILITY_DIGITS = 4  # Number of decimal places to round probabilities
 
 # Store flows for batch processing
@@ -341,8 +341,22 @@ cols = ['FlowID'] + netflow_features + [
     'App_Name', 'Start_Time', 'End_Time', 'Anomaly'
 ]
 
+
+# ATTACK_TYPES = ['Benign', 'Brute Force -Web', 'Brute Force -XSS',
+#                 'DoS attacks-GoldenEye', 'DoS attacks-Hulk',
+#                 'DoS attacks-SlowHTTPTest', 'DoS attacks-Slowloris',
+#                 'FTP-BruteForce', 'Infilteration', 'SQL Injection',
+#                 'SSH-Bruteforce'] # UNSW-NB15 types
+ATTACK_TYPES = ['Benign', 'FTP-BruteForce', 'SSH-Bruteforce',
+                'DoS_attacks-GoldenEye', 'DoS_attacks-Slowloris',
+                'DoS_attacks-SlowHTTPTest', 'DoS_attacks-Hulk',
+                'DDoS_attacks-LOIC-HTTP', 'DDOS_attack-LOIC-UDP',
+                'DDOS_attack-HOIC', 'Brute_Force_-Web', 'Brute_Force_-XSS',
+                'SQL_Injection', 'Infilteration', 'Bot'] # CSE-CIC-IDS2017 types
+
 flow_count = 0
 flow_df = pd.DataFrame(columns=cols)
+NUMB_NETFLOW_FEATURES = len(netflow_features)
 
 # Categorical columns that need encoding
 categorical_cols = ['TCP_FLAGS', 'L7_PROTO', 'PROTOCOL', 'CLIENT_TCP_FLAGS',
@@ -392,7 +406,7 @@ def load_models(dgi_multiclass_model_name=None, multiclass_classify_model_name=N
             
             dgi_multiclass_path = os.path.join(MODULE_DIR, 'models', dgi_multiclass_model_name)
             if os.path.exists(dgi_multiclass_path):
-                ndim_in = 39
+                ndim_in = NUMB_NETFLOW_FEATURES
                 edim = len(netflow_features)
                 dgi_multiclass_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
                 dgi_multiclass_model.load_state_dict(torch.load(dgi_multiclass_path, map_location=device))
@@ -418,7 +432,7 @@ def load_models(dgi_multiclass_model_name=None, multiclass_classify_model_name=N
             
             dgi_anomaly_path = os.path.join(MODULE_DIR, 'models', dgi_anomaly_model_name)
             if os.path.exists(dgi_anomaly_path):
-                ndim_in = 39
+                ndim_in = NUMB_NETFLOW_FEATURES
                 edim = len(netflow_features)
                 dgi_anomaly_model = DGI(ndim_in=ndim_in, ndim_out=128, edim=edim, activation=F.relu)
                 dgi_anomaly_model.load_state_dict(torch.load(dgi_anomaly_path, map_location=device))
@@ -592,7 +606,6 @@ def process_flow_batch(flows_data):
             # Normalize numerical features (use local scaler to avoid race conditions)
             local_scaler = Normalizer()
             X[cols_to_norm] = local_scaler.fit_transform(X[cols_to_norm])
-            # X[cols_to_norm] = scaler.transform(X[cols_to_norm])
 
             # Create feature vector for each edge - now all numeric
             X['h'] = X.values.tolist()
@@ -656,37 +669,21 @@ def process_flow_batch(flows_data):
                     risk_score = float(1 - proba[0])  # Risk is inverse of benign probability
 
                 if risk_score > 0.8:
-                    # risk = "Very High"
                     risk = "<p style=\"color:red;\">Very High</p>"
                 elif risk_score > 0.6:
-                    # risk = "High"
                     risk = "<p style=\"color:orangered;\">High</p>"
                 elif risk_score > 0.4:
-                    # risk = "Medium"
                     risk = "<p style=\"color:orange;\">Medium</p>"
                 elif risk_score > 0.2:
-                    # risk = "Low"
                     risk = "<p style=\"color:green;\">Low</p>"
                 else:
-                    # risk = "Minimal"
                     risk = "<p style=\"color:limegreen;\">Minimal</p>"
 
-                # attack_types = ['Benign', 'Brute Force -Web', 'Brute Force -XSS',
-                #                 'DoS attacks-GoldenEye', 'DoS attacks-Hulk',
-                #                 'DoS attacks-SlowHTTPTest', 'DoS attacks-Slowloris',
-                #                 'FTP-BruteForce', 'Infilteration', 'SQL Injection',
-                #                 'SSH-Bruteforce'] # UNSW-NB15 types
-                attack_types = ['Benign', 'FTP-BruteForce', 'SSH-Bruteforce',
-                                'DoS_attacks-GoldenEye', 'DoS_attacks-Slowloris',
-                                'DoS_attacks-SlowHTTPTest', 'DoS_attacks-Hulk',
-                                'DDoS_attacks-LOIC-HTTP', 'DDOS_attack-LOIC-UDP',
-                                'DDOS_attack-HOIC', 'Brute_Force_-Web', 'Brute_Force_-XSS',
-                                'SQL_Injection', 'Infilteration', 'Bot'] # CIC-IDS2017 types
-                classification = attack_types[int(pred)] if int(pred) < len(attack_types) else 'Unknown'
+                classification = ATTACK_TYPES[int(pred)] if int(pred) < len(ATTACK_TYPES) else 'Unknown'
 
                 # Create probability breakdown for all attack types
                 all_probabilities = {}
-                for idx, attack_type in enumerate(attack_types):
+                for idx, attack_type in enumerate(ATTACK_TYPES):
                     if idx < len(proba):
                         all_probabilities[attack_type] = round(float(proba[idx]), ROUND_PROBABILITY_DIGITS)
                 
@@ -820,27 +817,6 @@ def classify(flow_data, flow_obj=None):
     # Extract features
     features = extract_flow_features(flow_data)
 
-    # Format IP addresses with country flags (moved outside loop, only for display)
-    feature_string = []
-    for i, ip_key in enumerate(['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']):
-        ip = features[ip_key]
-        try:
-            if not ipaddress.ip_address(ip).is_private:
-                country = ipInfo(ip)
-                if country is not None and country not in ['ano', 'unknown']:
-                    img = f' <img src="static/images/blank.gif" class="flag flag-{country.lower()}" title="{country}">'
-                else:
-                    img = ' <img src="static/images/blank.gif" class="flag flag-unknown" title="UNKNOWN">'
-            else:
-                img = ' <img src="static/images/lan.gif" height="11px" style="margin-bottom: 0px" title="LAN">'
-            feature_string.append(ip + img)
-        except:
-            feature_string.append(ip)
-
-    # Add ports
-    feature_string.append(str(features['L4_SRC_PORT']))
-    feature_string.append(str(features['L4_DST_PORT']))
-
     # Track source IP (thread-safe)
     src_ip = features['IPV4_SRC_ADDR']
     with src_ip_dict_lock:
@@ -864,42 +840,42 @@ def classify(flow_data, flow_obj=None):
         flow_buffer.clear()
         flow_objects_buffer.clear()
     
-        # Process batch outside the lock to avoid blocking other threads
-        print(f"[DEBUG] Buffer full! Processing batch of {len(batch_to_process)} flows...")
-        results = process_flow_batch(batch_to_process)
+    # Process batch outside the lock to avoid blocking other threads
+    print(f"[DEBUG] Buffer full! Processing batch of {len(batch_to_process)} flows...")
+    results = process_flow_batch(batch_to_process)
 
-        # Pre-compute IP data once for the batch
-        with src_ip_dict_lock:
-            ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
-        batch_results_ip_data = pd.DataFrame(ip_data).to_json(orient='records')
+    # Pre-compute IP data once for the batch
+    with src_ip_dict_lock:
+        ip_data = {'SourceIP': list(src_ip_dict.keys()), 'count': list(src_ip_dict.values())}
+    batch_results_ip_data = pd.DataFrame(ip_data).to_json(orient='records')
 
-        if results and len(results) > 0:
-            print(f"[DEBUG] Got {len(results)} results for {len(batch_to_process)} flows")
-            # Process only flows we have results for
-            num_flows_to_process = min(len(results), len(batch_to_process))
+    if results and len(results) > 0:
+        print(f"[DEBUG] Got {len(results)} results for {len(batch_to_process)} flows")
+        # Process only flows we have results for
+        num_flows_to_process = min(len(results), len(batch_to_process))
 
-            # Emit model-based results
-            for idx in range(num_flows_to_process):
-                # Thread-safe flow_count increment
-                with flow_count_lock:
-                    flow_count += 1
-                    current_flow_id = flow_count
-                
-                flow_features = batch_to_process[idx]
-                flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
-                result = results[idx]
+        # Emit model-based results
+        for idx in range(num_flows_to_process):
+            # Thread-safe flow_count increment
+            with flow_count_lock:
+                flow_count += 1
+                current_flow_id = flow_count
+            
+            flow_features = batch_to_process[idx]
+            flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
+            result = results[idx]
 
-                _emit_flow_result(current_flow_id, flow_features, flow_object, result, batch_results_ip_data)
-        else:
-            # Fallback: emit placeholder rows so UI is not empty
-            for idx, flow_features in enumerate(batch_to_process):
-                # Thread-safe flow_count increment
-                with flow_count_lock:
-                    flow_count += 1
-                    current_flow_id = flow_count
-                
-                flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
-                _emit_flow_result(current_flow_id, flow_features, flow_object, None, batch_results_ip_data)
+            _emit_flow_result(current_flow_id, flow_features, flow_object, result, batch_results_ip_data)
+    else:
+        # Fallback: emit placeholder rows so UI is not empty
+        for idx, flow_features in enumerate(batch_to_process):
+            # Thread-safe flow_count increment
+            with flow_count_lock:
+                flow_count += 1
+                current_flow_id = flow_count
+            
+            flow_object = objects_to_process[idx] if idx < len(objects_to_process) else None
+            _emit_flow_result(current_flow_id, flow_features, flow_object, None, batch_results_ip_data)
 
 
 # ---- Pagination and history helpers ----
@@ -1240,25 +1216,30 @@ def newPacket(packet: Packet):
             # Print warning
             print(f"[DEBUG] Active flows exceeded limit ({flows_count} >= {MAX_ACTIVE_FLOWS}). Cleaning up {CLEANUP_BATCH_SIZE} oldest flows.")
 
-            # Force cleanup of oldest flows in a small batch without flushing the whole buffer            
+            # Extract oldest flows efficiently with minimal lock time
             flows_to_cleanup = []
             with current_flows_lock:
                 if len(current_flows) > 0:
-                    sorted_keys = sorted(current_flows.keys(), key=lambda k: current_flows[k].latest_timestamp)
-                    for key in sorted_keys[:CLEANUP_BATCH_SIZE]:
-                        flow_obj = current_flows[key]
-                        flows_to_cleanup.append((key, flow_obj.get_data(), flow_obj))
+                    # Use heapq for O(n log k) instead of O(n log n) - only extract what we need
+                    import heapq
+                    oldest_items = heapq.nsmallest(
+                        CLEANUP_BATCH_SIZE, 
+                        current_flows.items(), 
+                        key=lambda x: x[1].latest_timestamp
+                    )
+                    # Extract flow objects and remove from dict in one pass
+                    for key, flow_obj in oldest_items:
+                        flows_to_cleanup.append((key, flow_obj, flow_obj))
+                        del current_flows[key]
 
             if len(flows_to_cleanup) == 0:
                 return
             
-            # Add oldest flows to buffer for classification
-            for _, flow_data, flow_obj in flows_to_cleanup:
+            # Call get_data() outside the lock and classify
+            for key, flow_obj, _ in flows_to_cleanup:
+                flow_data = flow_obj.get_data()
                 classify(flow_data, flow_obj)
             
-            with current_flows_lock:
-                for key, _, _ in flows_to_cleanup:
-                    current_flows.pop(key, None)
         
         # Get flow key
         direction = PacketDirection.FORWARD
