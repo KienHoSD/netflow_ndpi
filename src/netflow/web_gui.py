@@ -677,15 +677,15 @@ def process_flow_batch(flows_data):
                 risk_score = float(1 - proba[0])  # Risk is inverse of benign probability
 
             if risk_score > 0.8:
-                risk = "<p style=\"color:red;\">Very High</p>"
+                risk = "Very High"
             elif risk_score > 0.6:
-                risk = "<p style=\"color:orangered;\">High</p>"
+                risk = "High"
             elif risk_score > 0.4:
-                risk = "<p style=\"color:orange;\">Medium</p>"
+                risk = "Medium"
             elif risk_score > 0.2:
-                risk = "<p style=\"color:green;\">Low</p>"
+                risk = "Low"
             else:
-                risk = "<p style=\"color:limegreen;\">Minimal</p>"
+                risk = "Minimal"
 
             classification = ATTACK_TYPES[int(pred)] if int(pred) < len(ATTACK_TYPES) else 'Unknown'
 

@@ -12,10 +12,22 @@ $(document).ready(function(){
     });
     
     // connect to the socket server (support http/https)
-    var socket = io(window.location.protocol + '//' + document.domain + ':' + location.port + '/test');
+    var socket = io(window.location.protocol + '//' + document.domain + ':' + location.port + '/test', {
+        reconnection: true,
+        reconnectionAttempts: 5,
+        reconnectionDelay: 1000,
+        timeout: 10000
+    });
     socket.on('connect', function(){
         console.log('Socket connected to /test');
     });
+    socket.on('disconnect', function(){
+        console.warn('Socket disconnected');
+    });
+    socket.on('error', function(err){
+        console.error('Socket error:', err);
+    });
+    
     var messages_received = [];
     var currentPage = 1;
     var maxPageSize = 500;
@@ -29,6 +41,14 @@ $(document).ready(function(){
     var chartUpdateQueued = false;
     var chartQueuedData = null;
     var logContainer = $('#log');
+    
+    // DDoS Protection: Throttle and queue management
+    var updateQueue = [];
+    var isProcessingQueue = false;
+    var lastTableUpdate = 0;
+    var tableUpdateDelay = 100; // ms between table updates
+    var maxQueueSize = 1000; // Drop events if queue exceeds this
+    var droppedEvents = 0;
     
     // Load initial flows on page load
     var initialLoadComplete = false;
@@ -246,6 +266,17 @@ $(document).ready(function(){
         }, 200); // small debounce window
     }
 
+    // HTML escaping to prevent XSS
+    function escapeHtml(unsafe) {
+        if (unsafe === null || unsafe === undefined) return '';
+        return unsafe.toString()
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;")
+            .replace(/'/g, "&#039;");
+    }
+    
     function isAtBottom($el) {
         if (!$el || !$el[0]) {
             return false;
@@ -259,7 +290,37 @@ $(document).ready(function(){
             $el.scrollTop($el[0].scrollHeight);
         }
     }
+    
+    // Debounced table update to prevent DOM thrashing
+    var tableUpdateQueued = false;
+    var pendingTableData = null;
+    
+    function scheduleTableUpdate(arr) {
+        pendingTableData = arr;
+        if (tableUpdateQueued) {
+            return;
+        }
+        
+        var now = Date.now();
+        var timeSinceLastUpdate = now - lastTableUpdate;
+        var delay = Math.max(0, tableUpdateDelay - timeSinceLastUpdate);
+        
+        tableUpdateQueued = true;
+        setTimeout(function() {
+            if (pendingTableData) {
+                rebuildTableFromArrayImmediate(pendingTableData);
+                lastTableUpdate = Date.now();
+                pendingTableData = null;
+            }
+            tableUpdateQueued = false;
+        }, delay);
+    }
+    
     function rebuildTableFromArray(arr) {
+        scheduleTableUpdate(arr);
+    }
+    
+    function rebuildTableFromArrayImmediate(arr) {
         var messages_string = '<tr><th>Flow ID</th><th>Src IP</th><th>Src Port</th><th>Dst IP</th><th>Dst Port</th><th>Protocol</th><th>Start</th><th>End</th><th>Flow Duration (ms)</th><th>App name</th><th>Anomaly</th><th>Prediction</th><th>Prob</th><th>Risk</th><th>Actions</th></tr>';
         for (var i = 0; i < arr.length; i++) {
             messages_string += '<tr>';
@@ -275,10 +336,10 @@ $(document).ready(function(){
                         messages_string += '<td>Unknown</td>';
                     }
                 } else {
-                    messages_string += '<td>' + arr[i][j].toString() + '</td>';
+                    messages_string += '<td>' + escapeHtml(arr[i][j]) + '</td>';
                 }
             }
-            messages_string += '<td> <a href="/flow-detail?flow_id=' + arr[i][0].toString() + '"><div>Detail</div></a></td>';
+            messages_string += '<td> <a href="/flow-detail?flow_id=' + escapeHtml(arr[i][0]) + '"><div>Detail</div></a></td>';
             messages_string += '</tr>';
         }
         $('#details').html(messages_string);
@@ -286,10 +347,18 @@ $(document).ready(function(){
 
     function loadPage(page) {
         liveMode = false;   
-        localStorage.setItem('liveMode', 'false');
+        try {
+            localStorage.setItem('liveMode', 'false');
+        } catch(e) {
+            console.warn('LocalStorage write failed:', e);
+        }
         $.getJSON('/api/flows', { page_size: Math.min(pageSize, maxPageSize) }, function(resp) {
             currentPage = 1; // API now returns latest flows only
             messages_received = (resp.data || []).slice(-maxPageSize); // Enforce limit
+            // Limit anomaly predictions object size
+            if (Object.keys(anomalyPredictions).length > maxPageSize) {
+                anomalyPredictions = {};
+            }
             // Load anomaly predictions from response
             if (resp.anomaly_predictions) {
                 for (var flowId in resp.anomaly_predictions) {
@@ -307,10 +376,13 @@ $(document).ready(function(){
                 $('#anomaly-flows-status').text('Loaded: ' + resp.anomaly_model_status.filename + 
                     ' - ' + alg + ' trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
             }
-            rebuildTableFromArray(messages_received);
+            rebuildTableFromArrayImmediate(messages_received);
             // update controls text
             $('#pagination-page').text('Static');
             initialLoadComplete = true;
+        }).fail(function(xhr, status, error) {
+            console.error('Failed to load flows:', status, error);
+            alert('Failed to load flows. Please try again.');
         });
     }
     
@@ -368,9 +440,13 @@ $(document).ready(function(){
     });
     $('#live-page').on('click', function() {
         liveMode = true;
-        localStorage.setItem('liveMode', 'true');
+        try {
+            localStorage.setItem('liveMode', 'true');
+        } catch(e) {
+            console.warn('LocalStorage write failed:', e);
+        }
         currentPage = 1; // treat live as latest
-        rebuildTableFromArray(messages_received);
+        rebuildTableFromArrayImmediate(messages_received);
         $('#pagination-page').text('Live');
     });
 
@@ -399,35 +475,79 @@ $(document).ready(function(){
         }
 
         liveMode = false;
-        rebuildTableFromArray(filteredFlows);
+        rebuildTableFromArrayImmediate(filteredFlows);
         $('#pagination-page').text('Range: ' + fromId + ' - ' + toId);
     });
 
-    //receive details from server
-    socket.on('newresult', function(msg) {
-        // Store anomaly prediction if provided
-        if (msg.anomaly_pred !== undefined && msg.flow_id !== undefined) {
-            anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
-        }
-
-        // Trim BEFORE adding if at limit to prevent exceeding maxPageSize
-        if (messages_received.length >= maxPageSize) {
-            var removed = messages_received.shift(); // Remove oldest
-            delete anomalyPredictions[removed[0]];
-        }
-
-        // Always record the flow, even if not currently in live mode
-        messages_received.push(msg.result);
-
-        // Only update UI if in live mode; otherwise keep data buffered
-        if (!liveMode) {
+    // Process queued updates in batches
+    function processUpdateQueue() {
+        if (isProcessingQueue || updateQueue.length === 0) {
             return;
         }
+        
+        isProcessingQueue = true;
+        
+        // Process batch of updates
+        var batchSize = Math.min(50, updateQueue.length);
+        var batch = updateQueue.splice(0, batchSize);
+        
+        for (var i = 0; i < batch.length; i++) {
+            var msg = batch[i];
+            
+            // Store anomaly prediction if provided
+            if (msg.anomaly_pred !== undefined && msg.flow_id !== undefined) {
+                anomalyPredictions[msg.flow_id] = msg.anomaly_pred;
+            }
 
-        var stickToBottom = isAtBottom(logContainer);
-        rebuildTableFromArray(messages_received);
-        if (stickToBottom) scrollToBottom(logContainer);
-        scheduleChartUpdate(msg.ips);
+            // Trim BEFORE adding if at limit to prevent exceeding maxPageSize
+            if (messages_received.length >= maxPageSize) {
+                var removed = messages_received.shift(); // Remove oldest
+                if (removed && removed[0]) {
+                    delete anomalyPredictions[removed[0]];
+                }
+            }
+
+            // Always record the flow
+            messages_received.push(msg.result);
+        }
+        
+        // Update UI once for entire batch if in live mode
+        if (liveMode) {
+            var stickToBottom = isAtBottom(logContainer);
+            rebuildTableFromArray(messages_received);
+            if (stickToBottom) scrollToBottom(logContainer);
+            
+            // Update chart with last message's IP data
+            if (batch.length > 0 && batch[batch.length - 1].ips) {
+                scheduleChartUpdate(batch[batch.length - 1].ips);
+            }
+        }
+        
+        isProcessingQueue = false;
+        
+        // Continue processing if more items in queue
+        if (updateQueue.length > 0) {
+            setTimeout(processUpdateQueue, 50);
+        }
+    }
+
+    // Receive details from server with throttling
+    socket.on('newresult', function(msg) {
+        // Drop events if queue is too large (backpressure)
+        if (updateQueue.length >= maxQueueSize) {
+            droppedEvents++;
+            if (droppedEvents % 100 === 0) {
+                console.warn('Dropped ' + droppedEvents + ' events due to high load');
+            }
+            return;
+        }
+        
+        updateQueue.push(msg);
+        
+        // Start processing if not already running
+        if (!isProcessingQueue) {
+            processUpdateQueue();
+        }
     });
 
     // Handle flow detail navigation
@@ -437,7 +557,7 @@ $(document).ready(function(){
             alert('Please enter a valid flow ID');
             return;
         }
-        window.location.href = '/flow-detail?flow_id=' + flowId;
+        window.location.href = '/flow-detail?flow_id=' + encodeURIComponent(flowId);
     });
 
     // Allow Enter key to trigger flow detail navigation
@@ -446,6 +566,13 @@ $(document).ready(function(){
             $('#go-to-flow-detail-btn').click();
         }
     });
+    
+    // Performance monitoring (optional debug info)
+    setInterval(function() {
+        if (droppedEvents > 0 || updateQueue.length > 100) {
+            console.log('Performance stats - Queue size: ' + updateQueue.length + ', Dropped: ' + droppedEvents);
+        }
+    }, 5000);
 
 });
 
