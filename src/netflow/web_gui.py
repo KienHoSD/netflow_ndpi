@@ -352,7 +352,7 @@ ATTACK_TYPES = ['Benign', 'FTP-BruteForce', 'SSH-Bruteforce',
                 'DoS_attacks-SlowHTTPTest', 'DoS_attacks-Hulk',
                 'DDoS_attacks-LOIC-HTTP', 'DDOS_attack-LOIC-UDP',
                 'DDOS_attack-HOIC', 'Brute_Force_-Web', 'Brute_Force_-XSS',
-                'SQL_Injection', 'Infilteration', 'Bot'] # CSE-CIC-IDS2017 types
+                'SQL_Injection', 'Infilteration', 'Bot'] # CSE-CIC-IDS2018 types
 
 flow_count = 0
 flow_df = pd.DataFrame(columns=cols)
@@ -489,6 +489,11 @@ def predict_anomaly(flow_features):
     if dgi_anomaly_model is None:
         return None
     
+    # Validate anomaly model is properly fitted
+    if not hasattr(anomaly_model, 'offset_') or anomaly_model.offset_ is None:
+        print("[Anomaly Detection] Model not properly fitted (missing offset_). Retraining required.")
+        return None
+    
     try:
         # Create DataFrame from flow features (similar to process_flow_batch)
         df = pd.DataFrame([flow_features])
@@ -564,11 +569,15 @@ def predict_anomaly(flow_features):
         df_fuse.fillna(0, inplace=True)
         
         # Predict with Anomaly Model: -1 = anomaly, 1 = normal
-        prediction = anomaly_model.predict(df_fuse.to_numpy())[0]
-        
-        # Convert: -1 -> 1 (anomaly), 1 -> 0 (normal)
-        result = 1 if prediction == -1 else 0
-        return result
+        try:
+            prediction = anomaly_model.predict(df_fuse.to_numpy())[0]
+            # Convert: -1 -> 1 (anomaly), 1 -> 0 (normal)
+            result = 1 if prediction == -1 else 0
+            return result
+        except AttributeError as ae:
+            print(f"[Anomaly Detection] Model state error: {ae}")
+            print(f"[Anomaly Detection] Model type: {type(anomaly_model)}, has offset_: {hasattr(anomaly_model, 'offset_')}")
+            return None
         
     except Exception as e:
         print(f"[Anomaly Detection] Prediction error: {e}")
@@ -792,7 +801,8 @@ def _emit_flow_result(current_flow_id, flow_features, flow_object, result, batch
     flow_duration = str(flow_features.get('FLOW_DURATION_MILLISECONDS', 0))
     
     display_data = [current_flow_id, disp_src, disp_sport, disp_dst, disp_dport,
-                    protocol, start_time, end_time, flow_duration, app_name, anomaly_pred, classification, proba_score, risk]
+                    protocol, start_time, end_time, flow_duration, app_name, 
+                    anomaly_pred, classification, proba_score, risk]
     
     # Emit to frontend
     socketio.emit('newresult', {
@@ -1096,6 +1106,12 @@ def api_upload_anomaly_flows():
         print(f"[Anomaly Detection] Training {selected_algo_name} with N={n_estimators}, contamination={contamination}")
         anomaly_model = algo_ctor()
         anomaly_model.fit(df_fuse.to_numpy())
+        
+        # Verify model is properly fitted
+        if hasattr(anomaly_model, 'offset_'):
+            print(f"[Anomaly Detection] Model fitted successfully. Offset: {anomaly_model.offset_}")
+        else:
+            print(f"[Anomaly Detection] Warning: Model may not be properly fitted")
         
         # Store DataFrame and metadata (thread-safe)
         with anomaly_data_lock:
