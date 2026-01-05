@@ -11,9 +11,10 @@ from .flow import Flow
 from .features.context import PacketDirection, get_packet_flow_key
 
 import numpy as np
-import pickle
-import csv
 import traceback
+import pickle
+import heapq
+import csv
 
 import json
 import pandas as pd
@@ -256,7 +257,7 @@ ROUND_PROBABILITY_DIGITS = 4  # Number of decimal places to round probabilities
 flow_objects_buffer = []  # Store Flow objects to access nDPI data
 flow_buffer = []
 flow_buffer_lock = Lock()  # Thread-safe access to flow_buffer and flow_objects_buffer
-process_batch_lock = Lock()  # Thread-safe access to process_flow_batch to prevent race conditions
+# process_batch_lock = Lock()  # Thread-safe access to process_flow_batch to prevent race conditions
 current_flows = {}
 current_flows_lock = Lock()  # Thread-safe access to current_flows
 src_ip_dict = {}
@@ -591,128 +592,126 @@ def process_flow_batch(flows_data):
     if not models_loaded or len(flows_data) == 0:
         return []
 
-    # # Use lock to prevent concurrent processing (e.g., during re-evaluation)
-    with process_batch_lock:
-        try:
-            # Create DataFrame from flows
-            df = pd.DataFrame(flows_data)
+    try:
+        # Create DataFrame from flows
+        df = pd.DataFrame(flows_data)
 
-            # Handle inf values
-            df.replace([np.inf, -np.inf], np.nan, inplace=True)
-            df.fillna(0, inplace=True)
+        # Handle inf values
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.fillna(0, inplace=True)
 
-            # Encode categorical features - convert to numeric codes
-            X = df[netflow_features].copy()
+        # Encode categorical features - convert to numeric codes
+        X = df[netflow_features].copy()
 
-            for col in categorical_cols:
-                if col in X.columns:
-                    # Convert to categorical codes (numeric)
-                    X[col] = pd.Categorical(X[col].astype(str)).codes
+        for col in categorical_cols:
+            if col in X.columns:
+                # Convert to categorical codes (numeric)
+                X[col] = pd.Categorical(X[col].astype(str)).codes
 
-            # Ensure all columns are numeric
-            X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
+        # Ensure all columns are numeric
+        X = X.apply(pd.to_numeric, errors='coerce').fillna(0)
 
-            # Normalize numerical features (use local scaler to avoid race conditions)
-            local_scaler = Normalizer()
-            X[cols_to_norm] = local_scaler.fit_transform(X[cols_to_norm])
+        # Normalize numerical features (use local scaler to avoid race conditions)
+        local_scaler = Normalizer()
+        X[cols_to_norm] = local_scaler.fit_transform(X[cols_to_norm])
 
-            # Create feature vector for each edge - now all numeric
-            X['h'] = X.values.tolist()
+        # Create feature vector for each edge - now all numeric
+        X['h'] = X.values.tolist()
 
-            # Build graph from flows
-            temp_df = pd.concat([X[['h']], df[['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']]], axis=1)
+        # Build graph from flows
+        temp_df = pd.concat([X[['h']], df[['IPV4_SRC_ADDR', 'IPV4_DST_ADDR']]], axis=1)
 
-            g = nx.from_pandas_edgelist(
-                temp_df,
-                "IPV4_SRC_ADDR",
-                "IPV4_DST_ADDR",
-                ["h"],
-                create_using=nx.MultiGraph()
-            )
-            g = g.to_directed()
+        g = nx.from_pandas_edgelist(
+            temp_df,
+            "IPV4_SRC_ADDR",
+            "IPV4_DST_ADDR",
+            ["h"],
+            create_using=nx.MultiGraph()
+        )
+        g = g.to_directed()
 
-            # Convert to DGL
-            g_dgl = dgl.from_networkx(g, edge_attrs=['h'])
+        # Convert to DGL
+        g_dgl = dgl.from_networkx(g, edge_attrs=['h'])
 
-            # Initialize node features on the correct device
-            nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(netflow_features)], device=device)
-            g_dgl.ndata['h'] = torch.reshape(nfeat_weight, (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
+        # Initialize node features on the correct device
+        nfeat_weight = torch.ones([g_dgl.number_of_nodes(), len(netflow_features)], device=device)
+        g_dgl.ndata['h'] = torch.reshape(nfeat_weight, (nfeat_weight.shape[0], 1, nfeat_weight.shape[1]))
 
-            # Reshape edge features and ensure they are on the device
-            g_dgl.edata['h'] = torch.reshape(g_dgl.edata['h'],
-                                            (g_dgl.edata['h'].shape[0], 1,
-                                            g_dgl.edata['h'].shape[1])).to(device)
+        # Reshape edge features and ensure they are on the device
+        g_dgl.edata['h'] = torch.reshape(g_dgl.edata['h'],
+                                        (g_dgl.edata['h'].shape[0], 1,
+                                        g_dgl.edata['h'].shape[1])).to(device)
 
-            # Move graph data to device (DGL will keep graph structure and move tensors)
-            g_dgl = g_dgl.to(device)
+        # Move graph data to device (DGL will keep graph structure and move tensors)
+        g_dgl = g_dgl.to(device)
 
-            # Get embeddings from DGI
-            with torch.no_grad():
-                embeddings = dgi_multiclass_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
-                embeddings = embeddings.detach().cpu().numpy()
+        # Get embeddings from DGI
+        with torch.no_grad():
+            embeddings = dgi_multiclass_model.encoder(g_dgl, g_dgl.ndata['h'], g_dgl.edata['h'])[1]
+            embeddings = embeddings.detach().cpu().numpy()
+        
+        # Memory cleanup: delete graph objects after use
+        del g_dgl, g, temp_df, nfeat_weight
+
+        # Fusion: Combine embeddings with raw features
+        # This matches the training approach in the notebook
+        df_emb = pd.DataFrame(embeddings)
+        df_raw = X.copy().drop(columns=['h'])
+        df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
+        
+        # Memory cleanup
+        del df_emb, embeddings
+
+        # Predict using CatBoost on fused features
+        predictions = multiclass_classify_model.predict(df_fuse)
+        probabilities = multiclass_classify_model.predict_proba(df_fuse)
+
+        results = []
+        for i, (pred, proba) in enumerate(zip(predictions, probabilities)):
+            max_proba = round(float(proba.max()), ROUND_PROBABILITY_DIGITS)
+
+            # Calculate risk based on probability
+            if pred != 0:  # Not benign
+                risk_score = float(proba[int(pred)] if int(pred) < len(proba) else max_proba)
+            else:
+                risk_score = float(1 - proba[0])  # Risk is inverse of benign probability
+
+            if risk_score > 0.8:
+                risk = "<p style=\"color:red;\">Very High</p>"
+            elif risk_score > 0.6:
+                risk = "<p style=\"color:orangered;\">High</p>"
+            elif risk_score > 0.4:
+                risk = "<p style=\"color:orange;\">Medium</p>"
+            elif risk_score > 0.2:
+                risk = "<p style=\"color:green;\">Low</p>"
+            else:
+                risk = "<p style=\"color:limegreen;\">Minimal</p>"
+
+            classification = ATTACK_TYPES[int(pred)] if int(pred) < len(ATTACK_TYPES) else 'Unknown'
+
+            # Create probability breakdown for all attack types
+            all_probabilities = {}
+            for idx, attack_type in enumerate(ATTACK_TYPES):
+                if idx < len(proba):
+                    all_probabilities[attack_type] = round(float(proba[idx]), ROUND_PROBABILITY_DIGITS)
             
-            # Memory cleanup: delete graph objects after use
-            del g_dgl, g, temp_df, nfeat_weight
+            # Sort by probability (descending)
+            sorted_probs = sorted(all_probabilities.items(), key=lambda x: x[1], reverse=True)
+            prob_str = ', '.join([f"{attack}: {prob*100:.1f}%" for attack, prob in sorted_probs])
 
-            # Fusion: Combine embeddings with raw features
-            # This matches the training approach in the notebook
-            df_emb = pd.DataFrame(embeddings)
-            df_raw = X.copy().drop(columns=['h'])
-            df_fuse = pd.concat([df_emb.reset_index(drop=True), df_raw.reset_index(drop=True)], axis=1)
-            
-            # Memory cleanup
-            del df_emb, embeddings
+            results.append({
+                'classification': classification,
+                'probability': max_proba,
+                'all_probabilities': all_probabilities,
+                'probability_str': prob_str,
+                'risk': risk
+            })
 
-            # Predict using CatBoost on fused features
-            predictions = multiclass_classify_model.predict(df_fuse)
-            probabilities = multiclass_classify_model.predict_proba(df_fuse)
+        return results
 
-            results = []
-            for i, (pred, proba) in enumerate(zip(predictions, probabilities)):
-                max_proba = round(float(proba.max()), ROUND_PROBABILITY_DIGITS)
-
-                # Calculate risk based on probability
-                if pred != 0:  # Not benign
-                    risk_score = float(proba[int(pred)] if int(pred) < len(proba) else max_proba)
-                else:
-                    risk_score = float(1 - proba[0])  # Risk is inverse of benign probability
-
-                if risk_score > 0.8:
-                    risk = "<p style=\"color:red;\">Very High</p>"
-                elif risk_score > 0.6:
-                    risk = "<p style=\"color:orangered;\">High</p>"
-                elif risk_score > 0.4:
-                    risk = "<p style=\"color:orange;\">Medium</p>"
-                elif risk_score > 0.2:
-                    risk = "<p style=\"color:green;\">Low</p>"
-                else:
-                    risk = "<p style=\"color:limegreen;\">Minimal</p>"
-
-                classification = ATTACK_TYPES[int(pred)] if int(pred) < len(ATTACK_TYPES) else 'Unknown'
-
-                # Create probability breakdown for all attack types
-                all_probabilities = {}
-                for idx, attack_type in enumerate(ATTACK_TYPES):
-                    if idx < len(proba):
-                        all_probabilities[attack_type] = round(float(proba[idx]), ROUND_PROBABILITY_DIGITS)
-                
-                # Sort by probability (descending)
-                sorted_probs = sorted(all_probabilities.items(), key=lambda x: x[1], reverse=True)
-                prob_str = ', '.join([f"{attack}: {prob*100:.1f}%" for attack, prob in sorted_probs])
-
-                results.append({
-                    'classification': classification,
-                    'probability': max_proba,
-                    'all_probabilities': all_probabilities,
-                    'probability_str': prob_str,
-                    'risk': risk
-                })
-
-            return results
-
-        except Exception as e:
-            traceback.print_exc()
-            return []
+    except Exception as e:
+        traceback.print_exc()
+        return []
 
 
 def _emit_flow_result(current_flow_id, flow_features, flow_object, result, batch_results_ip_data):
@@ -1237,7 +1236,6 @@ def newPacket(packet: Packet):
             with current_flows_lock:
                 if len(current_flows) > 0:
                     # Use heapq for O(n log k) instead of O(n log n) - only extract what we need
-                    import heapq
                     oldest_items = heapq.nsmallest(
                         CLEANUP_BATCH_SIZE, 
                         current_flows.items(), 
