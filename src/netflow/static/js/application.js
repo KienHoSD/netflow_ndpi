@@ -407,19 +407,15 @@ $(document).ready(function(){
     }, 500);
 
     // Add simple pagination controls
-    var controlsHtml = '<div id="pagination-controls" style="margin: 8px 0;">' +
-        '<span id="pagination-page">...</span> ' +
-        '<button id="refresh-page" class="btn btn-sm btn-default">Refresh</button> ' +
-        '<button id="live-page" class="btn btn-sm btn-primary">Live</button>' +
-        '<span style="margin-left: 20px;">Page Size (Max: ' + maxPageSize + '):</span> ' +
-        '<input type="number" id="page-size-input" min="1" value="' + pageSize + '" style="width: 80px; margin: 0 5px;"> ' +
-        '<button id="set-page-size" class="btn btn-sm btn-info">Set</button> ' +
-        '<span style="margin-left: 20px;">Flow Range:</span> ' +
-        '<input type="number" id="flow-from" placeholder="From" style="width: 80px; margin: 0 5px;" min="1"> ' +
-        '<input type="number" id="flow-to" placeholder="To" style="width: 80px; margin: 0 5px;" min="1"> ' +
-        '<button id="load-range-btn" class="btn btn-sm btn-warning">Show Range</button>' +
-        '</div>';
-    $('#content').prepend(controlsHtml);
+    var controlsHtml = '<button id="refresh-page" class="btn btn-xs btn-default">Refresh</button> ' +
+        '<button id="live-page" class="btn btn-xs btn-primary">Live</button> ' +
+        '<input type="number" id="page-size-input" min="1" value="' + pageSize + '" placeholder="Page Size" style="width: 70px; margin: 0 5px;" title="Max: ' + maxPageSize + '"> ' +
+        '<button id="set-page-size" class="btn btn-xs btn-info">Set</button> ' +
+        '<input type="number" id="flow-from" placeholder="From" style="width: 70px; margin: 0 5px;" min="1"> ' +
+        '<input type="number" id="flow-to" placeholder="To" style="width: 70px; margin: 0 5px;" min="1"> ' +
+        '<button id="load-range-btn" class="btn btn-xs btn-warning">Show Range</button>' +
+        '<span id="pagination-page" style="margin-left: 10px;">...</span> ';
+    $('#pagination-controls-container').html(controlsHtml);
 
     $('#refresh-page').on('click', function() {
         // Refresh the current paginated view

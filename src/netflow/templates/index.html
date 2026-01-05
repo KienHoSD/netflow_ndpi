@@ -157,12 +157,12 @@
 
     <canvas width = 60 height = 20 id="myChart"></canvas>
     <div class="row" style="margin-bottom: 15px;">
-        <p>Captured flow info here:</p>
         <h3>Captured flow:</h3>
         <div style="margin-bottom: 10px;">
             <label for="flow-detail-input">Go to Flow Detail:</label>
             <input type="number" id="flow-detail-input" placeholder="Enter flow ID" style="width: 150px; padding: 5px; margin: 0 5px;">
             <button id="go-to-flow-detail-btn" class="btn btn-sm btn-info">Open Detail</button>
+            <div id="pagination-controls-container" style="display: inline-block; margin-left: 20px;"></div>
         </div>
         <div id="log" style="max-height: 700px; overflow-y: auto; overflow-x: auto; border: 1px solid #ddd;">
         <table width="100%" border="1" cellpadding="2" cellspacing="0" class="display compact" id="details">
