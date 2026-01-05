@@ -385,6 +385,9 @@ $(document).ready(function(){
             alert('Failed to load flows. Please try again.');
         });
     }
+
+    // Ensure the first page loads immediately on initial page load
+    loadPage(1);
     
     // Load initial data on page load based on liveMode state
     setTimeout(function() {
