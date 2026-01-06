@@ -243,21 +243,21 @@ flows_csv_file = None  # Start as None, will be set when needed
 flows_csv_writer = None  # Start as None, will be set when needed
 flows_csv_lock: Lock = Lock()  # Synchronize concurrent file access
 
-DEFAULT_CSV_FILENAME = "flows.csv"
 DEFAULT_BPF_FILTER = "ip and (tcp or udp or icmp)"  # Default BPF filter for capturing relevant traffic
+DEFAULT_ANOM_ALGO = "IsolationForest"  # Default anomaly detection algorithm
+DEFAULT_CSV_FILENAME = "flows.csv"
+ROUND_PROBABILITY_DIGITS = 4  # Number of decimal places to round probabilities
 MAX_FLOW_HISTORY = 500  # Keep only recent flows to limit memory
 MAX_ACTIVE_FLOWS = 200  # Limit concurrent flows (older flows get removed, can not be reclassified)
 GC_SCAN_INTERVAL = 10  # Interval to scan for inactive flows in seconds
 GC_FLOW_TIMEOUT = 120  # Flow timeout in seconds - faster cleanup for short-lived flows like curl
 CLEANUP_BATCH_SIZE = 80  # Number of flows to cleanup when exceeding MAX_ACTIVE_FLOWS (Need to be smaller than MAX_ACTIVE_FLOWS)
 CLASSIFY_BATCH_SIZE = 20  # Emit immediately for fastest UI updates
-ROUND_PROBABILITY_DIGITS = 4  # Number of decimal places to round probabilities
 
 # Store flows for batch processing
 flow_objects_buffer = []  # Store Flow objects to access nDPI data
 flow_buffer = []
 flow_buffer_lock = Lock()  # Thread-safe access to flow_buffer and flow_objects_buffer
-# process_batch_lock = Lock()  # Thread-safe access to process_flow_batch to prevent race conditions
 current_flows = {}
 current_flows_lock = Lock()  # Thread-safe access to current_flows
 src_ip_dict = {}
@@ -273,7 +273,7 @@ anomaly_predictions_lock = Lock()  # Thread-safe access to anomaly_predictions
 anomaly_flows_file = None  # Current loaded anomaly flows filename
 anomaly_model = None  # Trained Anomaly Model
 anomaly_scaler = None  # Scaler for anomaly detection
-anomaly_algorithm = "IsolationForest"  # Current anomaly algorithm
+anomaly_algorithm = DEFAULT_ANOM_ALGO  # Current anomaly algorithm
 ANOMALY_FLOWS_DIR = os.path.join(MODULE_DIR, 'flows')
 anomaly_model_fitted = False  # Track if Model has been fitted
 anomaly_feature_order = []  # Features used during training for consistency

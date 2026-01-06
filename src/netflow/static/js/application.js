@@ -346,12 +346,6 @@ $(document).ready(function(){
     }
 
     function loadPage(page) {
-        liveMode = false;   
-        try {
-            localStorage.setItem('liveMode', 'false');
-        } catch(e) {
-            console.warn('LocalStorage write failed:', e);
-        }
         $.getJSON('/api/flows', { page_size: Math.min(pageSize, maxPageSize) }, function(resp) {
             currentPage = 1; // API now returns latest flows only
             messages_received = (resp.data || []).slice(-maxPageSize); // Enforce limit
@@ -377,8 +371,10 @@ $(document).ready(function(){
                     ' - ' + alg + ' trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
             }
             rebuildTableFromArrayImmediate(messages_received);
-            // update controls text
-            $('#pagination-page').text('Static');
+            // update controls text only if not in live mode
+            if (!liveMode) {
+                $('#pagination-page').text('Static');
+            }
             initialLoadComplete = true;
         }).fail(function(xhr, status, error) {
             console.error('Failed to load flows:', status, error);
@@ -386,26 +382,18 @@ $(document).ready(function(){
         });
     }
 
-    // Ensure the first page loads immediately on initial page load
-    loadPage(1);
-    
     // Load initial data on page load based on liveMode state
     setTimeout(function() {
-        if (!liveMode) {
-            // If in static mode, load the data
-            loadPage(1);
-        } else {
-            // If in live mode, just load anomaly model status
-            $.getJSON('/api/flows', { page_size: 0 }, function(resp) {
-                if (resp.anomaly_model_status && resp.anomaly_model_status.loaded) {
-                    anomalyFlowsLoaded = true;
-                    var alg = resp.anomaly_model_status.algorithm || 'IsolationForest';
-                    $('#anomaly-flows-status').text('Loaded: ' + resp.anomaly_model_status.filename + 
-                        ' - ' + alg + ' trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
-                }
-            });
-            $('#pagination-page').text('Live');
-        }
+        loadPage(1);
+        $.getJSON('/api/flows', { page_size: 0 }, function(resp) {
+            if (resp.anomaly_model_status && resp.anomaly_model_status.loaded) {
+                anomalyFlowsLoaded = true;
+                var alg = resp.anomaly_model_status.algorithm || 'IsolationForest';
+                $('#anomaly-flows-status').text('Loaded: ' + resp.anomaly_model_status.filename + 
+                    ' - ' + alg + ' trained on ' + resp.anomaly_model_status.total_flows + ' flows. Predicting anomalies on new flows...');
+            }
+        });
+        $('#pagination-page').text('Live');
         initialLoadComplete = true;
     }, 500);
 
@@ -421,7 +409,7 @@ $(document).ready(function(){
     $('#pagination-controls-container').html(controlsHtml);
 
     $('#refresh-page').on('click', function() {
-        // Refresh the current paginated view
+        // Refresh data while preserving current mode
         loadPage(currentPage);
     });
     $('#set-page-size').on('click', function() {
