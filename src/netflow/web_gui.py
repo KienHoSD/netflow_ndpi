@@ -232,11 +232,11 @@ _workers_lock = Lock()  # Protects background worker startup
 capture_interface = None  # None means capture from all interfaces
 capture_bpf_filter = None  # BPF filter for packet capture
 
-# Logging files
-f = open("output_logs.csv", 'w', newline='')
-output_log = csv.writer(f)
-f2 = open("input_logs.csv", 'w', newline='')
-input_logs = csv.writer(f2)
+# # Logging files
+# f = open("output_logs.csv", 'w', newline='')
+# output_log = csv.writer(f)
+# f2 = open("input_logs.csv", 'w', newline='')
+# input_logs = csv.writer(f2)
 
 # Flow CSV export
 flows_csv_file = None  # Start as None, will be set when needed
@@ -785,11 +785,11 @@ def _emit_flow_result(current_flow_id, flow_features, flow_object, result, batch
     # Persist to CSV
     _append_flow_row(record)
     
-    # Log output
-    output_log.writerow([f'Flow #{current_flow_id}'])
-    output_log.writerow(['Attack:'] + [classification] + [proba_score])
-    output_log.writerow(['All Probabilities:'] + [probability_str])
-    output_log.writerow(['--------------------------------------------------------------------------------------------------'])
+    # # Log output
+    # output_log.writerow([f'Flow #{current_flow_id}'])
+    # output_log.writerow(['Attack:'] + [classification] + [proba_score])
+    # output_log.writerow(['All Probabilities:'] + [probability_str])
+    # output_log.writerow(['--------------------------------------------------------------------------------------------------'])
     
     # Format display data
     disp_src = str(flow_features.get('IPV4_SRC_ADDR', '0.0.0.0'))
