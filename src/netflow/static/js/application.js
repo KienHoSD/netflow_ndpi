@@ -409,7 +409,12 @@ $(document).ready(function(){
     $('#pagination-controls-container').html(controlsHtml);
 
     $('#refresh-page').on('click', function() {
-        // Refresh data while preserving current mode
+        liveMode = false;
+        try {
+            localStorage.setItem('liveMode', 'false');
+        } catch(e) {
+            console.warn('LocalStorage write failed:', e);
+        }
         loadPage(currentPage);
     });
     $('#set-page-size').on('click', function() {
