@@ -109,6 +109,9 @@ class Flow:
         if attack != None:
             self.attack=attack
             self.label=1
+            
+        self.fin_seen_forward = False  # FIN observed from forward direction
+        self.fin_seen_reverse = False  # FIN observed from reverse direction
 
         # Collect data from first packet
         self._collect_packet_data(packet, direction)

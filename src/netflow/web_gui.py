@@ -252,7 +252,7 @@ MAX_ACTIVE_FLOWS = 200  # Limit concurrent flows (older flows get removed, can n
 GC_SCAN_INTERVAL = 10  # Interval to scan for inactive flows in seconds
 GC_FLOW_TIMEOUT = 120  # Flow timeout in seconds - faster cleanup for short-lived flows like curl
 CLEANUP_BATCH_SIZE = 80  # Number of flows to cleanup when exceeding MAX_ACTIVE_FLOWS (Need to be smaller than MAX_ACTIVE_FLOWS)
-CLASSIFY_BATCH_SIZE = 20  # Emit immediately for fastest UI updates
+CLASSIFY_BATCH_SIZE = 40  # Emit immediately for fastest UI updates
 
 # Store flows for batch processing
 flow_objects_buffer = []  # Store Flow objects to access nDPI data
@@ -372,9 +372,9 @@ device = 'cpu'
 print(f"Using device: {device}")
 
 # Model management
-current_dgi_multiclass_model_name = 'best_dgi_CSE_multiclass_v3.pkl'
-current_multiclass_classify_model_name = 'best_catboost_classifier_CSE_v3_fused.cbm'
-current_dgi_anomaly_model_name = 'best_dgi_CSE_anomaly_v3.pkl'
+current_dgi_multiclass_model_name = 'best_dgi_CSE_multiclass_v2.pkl'
+current_multiclass_classify_model_name = 'best_catboost_classifier_CSE_v2_fused.cbm'
+current_dgi_anomaly_model_name = 'best_dgi_CSE_anomaly_v2.pkl'
 model_lock = Lock()  # Thread-safe model loading
 
 def get_available_models():
@@ -1271,6 +1271,29 @@ def newPacket(packet: Packet):
             flow_exists_fwd = fwd_key in current_flows
             flow_exists_bwd = bwd_key in current_flows
         
+        def terminate_flow(flow, key):
+            flow_data = flow.get_data()
+            classify(flow_data, flow)  # Pass Flow object
+            with current_flows_lock:
+                current_flows.pop(key, None)
+
+        def handle_tcp_termination(flow, tcp, direction, key):
+            # Immediate tear-down on RST
+            if tcp.flags & 0x04:
+                terminate_flow(flow, key)
+                return
+
+            # Track FINs per direction
+            if tcp.flags & 0x01:
+                if direction == PacketDirection.FORWARD:
+                    flow.fin_seen_forward = True
+                else:
+                    flow.fin_seen_reverse = True
+
+            # Terminate after FINs from both sides plus any ACK (may be same packet as FIN)
+            if flow.fin_seen_forward and flow.fin_seen_reverse and (tcp.flags & 0x10):
+                terminate_flow(flow, key)
+        
         if flow_exists_fwd:
             with current_flows_lock:
                 flow = current_flows[fwd_key]
@@ -1281,11 +1304,7 @@ def newPacket(packet: Packet):
             # Check for flow termination (FIN or RST) or if it looks complete
             if packet.haslayer("TCP"):
                 tcp = packet["TCP"]
-                if tcp.flags & 0x01 or tcp.flags & 0x04:  # FIN or RST
-                    flow_data = flow.get_data()
-                    classify(flow_data, flow)  # Pass Flow object
-                    with current_flows_lock:
-                        current_flows.pop(fwd_key, None)
+                handle_tcp_termination(flow, tcp, PacketDirection.FORWARD, fwd_key)
 
         elif flow_exists_bwd:
             with current_flows_lock:
@@ -1297,13 +1316,16 @@ def newPacket(packet: Packet):
             # Check for flow termination
             if packet.haslayer("TCP"):
                 tcp = packet["TCP"]
-                if tcp.flags & 0x01 or tcp.flags & 0x04:  # FIN or RST
-                    flow_data = flow.get_data()
-                    classify(flow_data, flow)  # Pass Flow object
-                    with current_flows_lock:
-                        current_flows.pop(bwd_key, None)
+                handle_tcp_termination(flow, tcp, PacketDirection.REVERSE, bwd_key)
+                
         else:
-            # Create new flow
+            # Create new flow (require SYN for TCP so we don't start midstream ACK-only flows)
+            if packet.haslayer("TCP"):
+                tcp = packet["TCP"]
+                if not (tcp.flags & 0x02):  # No SYN bit => ignore starting flow
+                    return
+
+            # Non-TCP packets or TCP with SYN reach here
             flow = Flow(packet, PacketDirection.FORWARD, attack=None)
             with current_flows_lock:
                 current_flows[fwd_key] = flow
